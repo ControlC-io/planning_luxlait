@@ -94,6 +94,13 @@ export const jwtAuth = async (
   req.user = payload;
   req.userRoles = payload.roles;
 
+  // Global admin bypass: if token carries an admin role, allow access.
+  const normalizedRoles = (payload.roles ?? []).map((r) => String(r).toLowerCase());
+  if (normalizedRoles.some((r) => r.includes('admin'))) {
+    next();
+    return;
+  }
+
   // RBAC: verify the user has a role that permits this endpoint
   const allowed = await hasRoleAccess(payload.userId, req.method, req.path);
   if (!allowed) {

@@ -106,6 +106,12 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
             u_day = _parse_date_yyyy_mm_dd(u.day_date)
             unavailable.add((u.employee_id, u_day))
 
+        closed_days: Set[dt.date] = {
+            _parse_date_yyyy_mm_dd(day)
+            for day in (req.closed_days or [])
+            if isinstance(day, str) and day.strip()
+        }
+
         qualified_for_machine: Dict[str, Set[str]] = {m_id: set() for m_id in machine_ids}
         for sk in req.skills:
             if sk.machine_id in qualified_for_machine:
@@ -124,6 +130,14 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
 
         # Validate locked assignments against machine downtime and open shift rules.
         for (e_id, d), a in locked.items():
+            if d in closed_days:
+                return SolveResponse(
+                    ok=False,
+                    assignments=[],
+                    stats={"durationMs": int((time.time() - start) * 1000), "error": "Locked closed day conflict"},
+                    error="Locked assignment exists on a closed day",
+                )
+
             if d in machine_downtime_by_machine_id.get(a.machine_id, set()):
                 return SolveResponse(
                     ok=False,
@@ -172,12 +186,15 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                 assigned_any[(e_id, d)] = assigned
 
                 is_unavailable = (e_id, d) in unavailable
+                is_closed_day = d in closed_days
 
                 for m_id in machine_ids:
                     var = model.new_bool_var(f"x_e{e_id}_d{d.isoformat()}_m{m_id}")
                     x[(e_id, d, m_id)] = var
 
                     if is_unavailable:
+                        model.add(var == 0)
+                    if is_closed_day:
                         model.add(var == 0)
                     if d in machine_downtime_by_machine_id.get(m_id, set()):
                         model.add(var == 0)
@@ -216,7 +233,108 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                     else:
                         model.add(x[(e_id, d, m_id)] == 0)
 
-        priority_staffed_vars: List[cp_model.IntVar] = []
+        locked_shift_coverage: Dict[Tuple[str, dt.date, str], int] = defaultdict(int)
+        for (_, d), a in locked.items():
+            if a.time_slot_id:
+                locked_shift_coverage[(a.machine_id, d, a.time_slot_id)] += 1
+
+        priority_shift_covered_vars: List[cp_model.IntVar] = []
+
+        # Mandatory open shift coverage is a hard constraint.
+        # Priority open shift coverage is a soft objective.
+        for m_id in machine_ids:
+            m = machine_by_id[m_id]
+            open_slots = machine_open_time_slots_by_machine_id.get(m_id, set())
+            if not open_slots:
+                continue
+
+            downtime_set = machine_downtime_by_machine_id.get(m_id, set())
+            qualified_in_scope = qualified_for_machine.get(m_id, set())
+
+            for d in days:
+                if d in closed_days:
+                    continue
+                if d in downtime_set:
+                    continue
+
+                for ts_id in open_slots:
+                    if ts_id not in working_time_slot_set:
+                        if m.importance == "MANDATORY":
+                            return SolveResponse(
+                                ok=False,
+                                assignments=[],
+                                stats={
+                                    "durationMs": int((time.time() - start) * 1000),
+                                    "error": "Mandatory open shift outside working set",
+                                },
+                                error=(
+                                    f"Mandatory machine {m_id} requires time slot {ts_id} on {d.isoformat()}, "
+                                    "but this time slot is not available for planning"
+                                ),
+                            )
+                        continue
+
+                    if locked_shift_coverage.get((m_id, d, ts_id), 0) > 0:
+                        if m.importance == "PRIORITY":
+                            covered_by_locked = model.new_bool_var(
+                                f"covered_priority_m{m_id}_d{d.isoformat()}_ts{ts_id}_locked"
+                            )
+                            model.add(covered_by_locked == 1)
+                            priority_shift_covered_vars.append(covered_by_locked)
+                        continue
+
+                    candidate_overlap_lits: List[cp_model.IntVar] = []
+                    for e_id in employee_ids:
+                        if e_id not in qualified_in_scope:
+                            continue
+                        if (e_id, d) in locked_emp_days:
+                            continue
+                        if (e_id, d) in unavailable:
+                            continue
+                        if (e_id, d, m_id) not in x or (e_id, d, ts_id) not in t:
+                            continue
+
+                        overlap = model.new_bool_var(
+                            f"ov_e{e_id}_m{m_id}_d{d.isoformat()}_ts{ts_id}"
+                        )
+                        model.add(overlap <= x[(e_id, d, m_id)])
+                        model.add(overlap <= t[(e_id, d, ts_id)])
+                        model.add(overlap >= x[(e_id, d, m_id)] + t[(e_id, d, ts_id)] - 1)
+                        candidate_overlap_lits.append(overlap)
+
+                    if not candidate_overlap_lits:
+                        if m.importance == "MANDATORY":
+                            return SolveResponse(
+                                ok=False,
+                                assignments=[],
+                                stats={
+                                    "durationMs": int((time.time() - start) * 1000),
+                                    "error": "Mandatory open shift has no feasible employee",
+                                },
+                                error=(
+                                    f"Mandatory machine {m_id} has no feasible employee for "
+                                    f"time slot {ts_id} on {d.isoformat()}"
+                                ),
+                            )
+
+                        if m.importance == "PRIORITY":
+                            not_covered = model.new_bool_var(
+                                f"covered_priority_m{m_id}_d{d.isoformat()}_ts{ts_id}_none"
+                            )
+                            model.add(not_covered == 0)
+                            priority_shift_covered_vars.append(not_covered)
+                        continue
+
+                    shift_covered = model.new_bool_var(
+                        f"covered_m{m_id}_d{d.isoformat()}_ts{ts_id}"
+                    )
+                    model.add(sum(candidate_overlap_lits) >= 1).only_enforce_if(shift_covered)
+                    model.add(sum(candidate_overlap_lits) == 0).only_enforce_if(shift_covered.Not())
+
+                    if m.importance == "MANDATORY":
+                        model.add(shift_covered == 1)
+                    elif m.importance == "PRIORITY":
+                        priority_shift_covered_vars.append(shift_covered)
 
         # Machine capacity (subtract locked-in occupants) and skills pairing
         for m_id in machine_ids:
@@ -225,6 +343,8 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
             downtime_set = machine_downtime_by_machine_id.get(m_id, set())
 
             for d in days:
+                if d in closed_days:
+                    continue
                 if d in downtime_set:
                     continue
 
@@ -265,9 +385,6 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                 used_md = model.new_bool_var(f"used_m{m_id}_d{d.isoformat()}")
                 model.add(sum_x_md >= 1).only_enforce_if(used_md)
                 model.add(sum_x_md == 0).only_enforce_if(used_md.Not())
-
-                if m.importance == "PRIORITY":
-                    priority_staffed_vars.append(used_md)
 
                 already_has_locked_qualified = any(
                     a.employee_id in qualified_in_scope
@@ -341,22 +458,15 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
         fairness_cost = model.new_int_var(0, len(days), "fairness_cost")
         model.add(fairness_cost == max_shifts - min_shifts)
 
-        leader_assignments = []
-        for e_id in employee_ids:
-            if emp_by_id.get(e_id, EmployeeInput(id=e_id)).is_team_leader:
-                leader_assignments.append(totals[e_id])
-
-        leader_assignments_sum = sum(leader_assignments) if leader_assignments else model.new_int_var(0, 0, "leader_assignments")
-
         fairness_weight = req.constraints.fairness_weight
-        leader_weight = req.constraints.leader_weight
         priority_weight = req.constraints.priority_machine_weight
 
-        priority_staffed_sum = sum(priority_staffed_vars) if priority_staffed_vars else 0
+        priority_shift_covered_sum = (
+            sum(priority_shift_covered_vars) if priority_shift_covered_vars else 0
+        )
         objective = (
             fairness_weight * fairness_cost
-            - leader_weight * leader_assignments_sum
-            - priority_weight * priority_staffed_sum
+            - priority_weight * priority_shift_covered_sum
         )
         model.minimize(objective)
 
@@ -384,20 +494,17 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
 
         # Re-emit locked-in assignments as-is.
         for (e_id, d), a in locked.items():
-            emp = emp_by_id.get(e_id)
             assignments.append(
                 PlannedAssignment(
                     day_date=d.isoformat(),
                     employee_id=e_id,
                     machine_id=a.machine_id,
                     time_slot_id=a.time_slot_id or "",
-                    team_id=a.team_id or (emp.default_team_id if emp else None),
                 )
             )
 
         # Collect solver-decided assignments.
         for e_id in employee_ids:
-            emp = emp_by_id[e_id]
             for d in days:
                 if (e_id, d) not in assigned_any:
                     continue
@@ -428,7 +535,6 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                         employee_id=e_id,
                         machine_id=chosen_machine_id,
                         time_slot_id=chosen_time_slot_id or "",
-                        team_id=emp.default_team_id,
                     )
                 )
 

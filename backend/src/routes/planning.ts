@@ -5,6 +5,7 @@ const router = express.Router();
 
 const toYYYYMMDD = (d: Date): string => d.toISOString().slice(0, 10);
 const parseYYYYMMDD = (s: string): Date => new Date(`${s}T00:00:00.000Z`);
+const CLOSED_WEEKDAYS_SETTING_KEY = 'planning_closed_weekdays';
 
 function isAdminOrManager(roles: string[] | undefined): boolean {
   const normalized = (roles ?? []).map((r) => String(r).toLowerCase());
@@ -14,15 +15,6 @@ function isAdminOrManager(roles: string[] | undefined): boolean {
 // -----------------------------------------------------------------------------
 // Select helpers (convert Prisma/camelCase -> frontend/snake_case)
 // -----------------------------------------------------------------------------
-function mapTeam(t: any) {
-  return {
-    id: t.id,
-    name: t.name,
-    color: t.color,
-    sort_order: t.sortOrder,
-    created_at: t.createdAt ? toYYYYMMDD(new Date(t.createdAt)) : null,
-  };
-}
 
 function mapMachine(m: any) {
   return {
@@ -43,8 +35,6 @@ function mapEmployee(e: any) {
     id: e.id,
     first_name: e.firstName,
     last_name: e.lastName,
-    default_team_id: e.defaultTeamId,
-    is_team_leader: e.isTeamLeader,
     is_backup: e.isBackup,
     active: e.active,
     created_at: e.createdAt ? toYYYYMMDD(new Date(e.createdAt)) : null,
@@ -87,7 +77,6 @@ function mapDailyAssignment(a: any) {
     employee_id: a.employeeId,
     machine_id: a.machineId,
     time_slot_id: a.timeSlotId,
-    team_id: a.teamId,
     created_at: a.createdAt ? toYYYYMMDD(new Date(a.createdAt)) : null,
   };
 }
@@ -120,20 +109,34 @@ function mapMachineDowntime(dt: any) {
   };
 }
 
+function mapClosedDay(cd: any) {
+  return {
+    id: cd.id,
+    day_date: toYYYYMMDD(cd.dayDate),
+    reason: cd.reason,
+    created_at: cd.createdAt ? toYYYYMMDD(new Date(cd.createdAt)) : null,
+  };
+}
+
+function parseClosedWeekdays(config: unknown): number[] {
+  const raw = Array.isArray(config)
+    ? config
+    : config && typeof config === 'object' && 'value' in config
+      ? (config as any).value
+      : [];
+  if (!Array.isArray(raw)) return [];
+  return Array.from(
+    new Set(
+      raw
+        .map((n) => Number(n))
+        .filter((n) => Number.isInteger(n) && n >= 0 && n <= 6)
+    )
+  ).sort((a, b) => a - b);
+}
+
 // -----------------------------------------------------------------------------
 // Planning selects (used by Planning.tsx)
 // -----------------------------------------------------------------------------
-
-router.get('/luxlait_teams', async (req: Request, res: Response) => {
-  try {
-    const teams = await prisma.luxlaitTeam.findMany({
-      orderBy: { sortOrder: 'asc' },
-    });
-    res.json(teams.map(mapTeam));
-  } catch (e) {
-    res.status(500).json({ error: 'Failed to fetch teams' });
-  }
-});
 
 router.get('/luxlait_machines', async (req: Request, res: Response) => {
   try {
@@ -220,6 +223,61 @@ router.get('/luxlait_machine_downtimes', async (req: Request, res: Response) => 
   }
 });
 
+router.get('/luxlait_closed_days', async (req: Request, res: Response) => {
+  try {
+    const from = (req.query.fromDate ?? req.query.from) as string | undefined;
+    const to = (req.query.toDate ?? req.query.to) as string | undefined;
+
+    const where =
+      from && to
+        ? {
+            dayDate: { gte: parseYYYYMMDD(from), lte: parseYYYYMMDD(to) },
+          }
+        : undefined;
+
+    const closedDays = await prisma.$queryRawUnsafe<Array<{
+      id: string;
+      day_date: Date;
+      reason: string | null;
+      created_at: Date;
+    }>>(
+      from && to
+        ? `SELECT id, day_date, reason, created_at
+           FROM luxlait_closed_days
+           WHERE day_date >= $1::date AND day_date <= $2::date
+           ORDER BY day_date ASC`
+        : `SELECT id, day_date, reason, created_at
+           FROM luxlait_closed_days
+           ORDER BY day_date ASC`,
+      ...(from && to ? [from, to] : [])
+    );
+
+    res.json(
+      closedDays.map((cd) => ({
+        id: cd.id,
+        day_date: toYYYYMMDD(new Date(cd.day_date)),
+        reason: cd.reason,
+        created_at: toYYYYMMDD(new Date(cd.created_at)),
+      }))
+    );
+  } catch (err) {
+    const detail = process.env.NODE_ENV === 'development' && err instanceof Error ? err.message : undefined;
+    res.status(500).json({ error: 'Failed to fetch closed days', detail });
+  }
+});
+
+router.get('/luxlait_closed_weekdays', async (_req: Request, res: Response) => {
+  try {
+    const setting = await prisma.systemSettings.findUnique({
+      where: { settingKey: CLOSED_WEEKDAYS_SETTING_KEY },
+    });
+    const weekdays = parseClosedWeekdays(setting?.providerConfig);
+    res.json({ setting_key: CLOSED_WEEKDAYS_SETTING_KEY, weekdays });
+  } catch {
+    res.status(500).json({ error: 'Failed to fetch closed weekdays' });
+  }
+});
+
 router.get('/luxlait_employee_machine_skills', async (_req: Request, res: Response) => {
   try {
     const skills = await prisma.luxlaitEmployeeMachineSkill.findMany();
@@ -282,7 +340,6 @@ router.post('/luxlait_daily_assignments', async (req: Request, res: Response) =>
       employee_id: string;
       machine_id: string;
       time_slot_id: string | null;
-      team_id: string;
     };
 
     const created = await prisma.luxlaitDailyAssignment.create({
@@ -291,7 +348,6 @@ router.post('/luxlait_daily_assignments', async (req: Request, res: Response) =>
         employeeId: body.employee_id,
         machineId: body.machine_id,
         timeSlotId: body.time_slot_id ?? null,
-        teamId: body.team_id,
       },
     });
 
@@ -309,7 +365,6 @@ router.post('/luxlait_daily_assignments/upsert', async (req: Request, res: Respo
         employee_id: string;
         machine_id: string;
         time_slot_id: string | null;
-        team_id: string;
       }>;
     };
 
@@ -329,14 +384,12 @@ router.post('/luxlait_daily_assignments/upsert', async (req: Request, res: Respo
           update: {
             machineId: r.machine_id,
             timeSlotId: r.time_slot_id ?? null,
-            teamId: r.team_id,
           },
           create: {
             dayDate: parseYYYYMMDD(r.day_date),
             employeeId: r.employee_id,
             machineId: r.machine_id,
             timeSlotId: r.time_slot_id ?? null,
-            teamId: r.team_id,
           },
         })
       )
@@ -356,7 +409,6 @@ router.post('/luxlait_daily_assignments/bulk_upsert', async (req: Request, res: 
         employee_id: string;
         machine_id: string;
         time_slot_id: string | null;
-        team_id: string;
       }>;
     };
 
@@ -375,14 +427,12 @@ router.post('/luxlait_daily_assignments/bulk_upsert', async (req: Request, res: 
           update: {
             machineId: r.machine_id,
             timeSlotId: r.time_slot_id ?? null,
-            teamId: r.team_id,
           },
           create: {
             dayDate: parseYYYYMMDD(r.day_date),
             employeeId: r.employee_id,
             machineId: r.machine_id,
             timeSlotId: r.time_slot_id ?? null,
-            teamId: r.team_id,
           },
         })
       )
@@ -605,9 +655,9 @@ router.put('/luxlait_machines/:id/open_shifts', async (req: Request, res: Respon
     }
 
     const { id } = req.params;
-    const body = req.body as { timeSlotIds: string[] };
-
-    const ids = Array.isArray(body?.timeSlotIds) ? body.timeSlotIds : [];
+    const body = req.body as { timeSlotIds?: string[]; ids?: string[] };
+    const incomingIds = Array.isArray(body?.timeSlotIds) ? body.timeSlotIds : body?.ids;
+    const ids = Array.isArray(incomingIds) ? incomingIds : [];
 
     await prisma.$transaction(async (tx) => {
       await tx.luxlaitMachineOpenShift.deleteMany({ where: { machineId: id } });
@@ -715,6 +765,100 @@ router.delete('/luxlait_machine_downtimes/:id', async (req: Request, res: Respon
     res.json({ ok: true });
   } catch {
     res.status(500).json({ error: 'Failed to delete machine downtime' });
+  }
+});
+
+router.post('/luxlait_closed_days', async (req: Request, res: Response) => {
+  try {
+    if (!isAdminOrManager(req.userRoles)) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    const body = req.body as { day_date: string; reason?: string | null };
+    if (!body?.day_date) {
+      res.status(400).json({ error: 'day_date is required' });
+      return;
+    }
+
+    const rows = await prisma.$queryRawUnsafe<Array<{
+      id: string;
+      day_date: Date;
+      reason: string | null;
+      created_at: Date;
+    }>>(
+      `INSERT INTO luxlait_closed_days (day_date, reason)
+       VALUES ($1::date, $2)
+       ON CONFLICT (day_date) DO UPDATE SET reason = EXCLUDED.reason
+       RETURNING id, day_date, reason, created_at`,
+      body.day_date,
+      body.reason ?? null
+    );
+    const created = rows[0];
+    res.json({
+      data: {
+        id: created?.id,
+        day_date: created ? toYYYYMMDD(new Date(created.day_date)) : body.day_date,
+        reason: created?.reason ?? body.reason ?? null,
+        created_at: created?.created_at ? toYYYYMMDD(new Date(created.created_at)) : null,
+      },
+    });
+  } catch (err) {
+    const detail = process.env.NODE_ENV === 'development' && err instanceof Error ? err.message : undefined;
+    res.status(500).json({ error: 'Failed to upsert closed day', detail });
+  }
+});
+
+router.put('/luxlait_closed_weekdays', async (req: Request, res: Response) => {
+  try {
+    if (!isAdminOrManager(req.userRoles)) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    const body = req.body as { weekdays?: number[] };
+    const weekdays = parseClosedWeekdays(body?.weekdays ?? []);
+
+    await prisma.systemSettings.upsert({
+      where: { settingKey: CLOSED_WEEKDAYS_SETTING_KEY },
+      create: {
+        settingKey: CLOSED_WEEKDAYS_SETTING_KEY,
+        isEnabled: weekdays.length > 0,
+        providerConfig: weekdays,
+      },
+      update: {
+        isEnabled: weekdays.length > 0,
+        providerConfig: weekdays,
+      },
+    });
+
+    res.json({ ok: true, weekdays });
+  } catch {
+    res.status(500).json({ error: 'Failed to update closed weekdays' });
+  }
+});
+
+router.delete('/luxlait_closed_days', async (req: Request, res: Response) => {
+  try {
+    if (!isAdminOrManager(req.userRoles)) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    const body = req.body as { day_date?: string };
+    if (!body?.day_date) {
+      res.status(400).json({ error: 'day_date is required' });
+      return;
+    }
+
+    await prisma.$executeRawUnsafe(
+      `DELETE FROM luxlait_closed_days WHERE day_date = $1::date`,
+      body.day_date
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    const detail = process.env.NODE_ENV === 'development' && err instanceof Error ? err.message : undefined;
+    res.status(500).json({ error: 'Failed to delete closed day', detail });
   }
 });
 

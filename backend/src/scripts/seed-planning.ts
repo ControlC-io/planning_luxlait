@@ -5,13 +5,6 @@ const prisma = new PrismaClient();
 
 const uuid = () => randomUUID();
 
-const TEAMS = [
-  { id: uuid(), name: "Alpha", color: "#3B82F6", sortOrder: 1 },
-  { id: uuid(), name: "Bravo", color: "#EF4444", sortOrder: 2 },
-  { id: uuid(), name: "Charlie", color: "#10B981", sortOrder: 3 },
-  { id: uuid(), name: "Delta", color: "#F59E0B", sortOrder: 4 },
-];
-
 const MACHINES = [
   { id: uuid(), name: "Pasteurizer A", shortName: "PA", sortOrder: 1, machineGroup: "Pasteurization", maxEmployees: 2 },
   { id: uuid(), name: "Pasteurizer B", shortName: "PB", sortOrder: 2, machineGroup: "Pasteurization", maxEmployees: 2 },
@@ -66,16 +59,12 @@ function pickRandom<T>(arr: T[], count: number): T[] {
 
 function buildEmployees() {
   return Array.from({ length: 50 }, (_, i) => {
-    const teamIndex = i % TEAMS.length;
-    const isLeader = i < 4;
-    const isBackup = !isLeader && i >= 4 && i < 8;
+    const isBackup = i < 8;
 
     return {
       id: uuid(),
       firstName: FIRST_NAMES[i],
       lastName: LAST_NAMES[i],
-      defaultTeamId: TEAMS[teamIndex].id,
-      isTeamLeader: isLeader,
       isBackup,
       active: true,
     };
@@ -138,7 +127,6 @@ async function seedPlanning() {
   console.log("Clearing existing planning data...");
   await prisma.luxlaitDailyAssignment.deleteMany();
   await prisma.luxlaitWeeklyAssignment.deleteMany();
-  await prisma.luxlaitTeamDailySlot.deleteMany();
   await prisma.luxlaitMachineDowntime.deleteMany();
   await prisma.luxlaitMachineOpenShift.deleteMany();
   await prisma.luxlaitEmployeeMachineSkill.deleteMany();
@@ -147,14 +135,7 @@ async function seedPlanning() {
   await prisma.luxlaitEmployee.deleteMany();
   await prisma.luxlaitTimeSlot.deleteMany();
   await prisma.luxlaitStatus.deleteMany();
-  await prisma.luxlaitTeam.deleteMany();
   console.log("  Cleared all planning tables\n");
-
-  console.log("Creating teams...");
-  for (const t of TEAMS) {
-    await prisma.luxlaitTeam.create({ data: t });
-  }
-  console.log(`  + ${TEAMS.length} teams\n`);
 
   console.log("Creating machines...");
   for (const m of MACHINES) {
@@ -179,9 +160,8 @@ async function seedPlanning() {
   for (const e of employees) {
     await prisma.luxlaitEmployee.create({ data: e });
   }
-  const leaders = employees.filter((e) => e.isTeamLeader).length;
   const backups = employees.filter((e) => e.isBackup).length;
-  console.log(`  + ${employees.length} employees (${leaders} leaders, ${backups} backups)\n`);
+  console.log(`  + ${employees.length} employees (${backups} backups)\n`);
 
   const skills = buildSkills(employees);
   console.log("Creating skills...");
@@ -199,7 +179,6 @@ async function seedPlanning() {
 
   console.log("Planning test data seeded successfully!");
   console.log("Summary:");
-  console.log(`  Teams:      ${TEAMS.length}`);
   console.log(`  Machines:   ${MACHINES.length}`);
   console.log(`  Time Slots: ${TIME_SLOTS.length}`);
   console.log(`  Statuses:   ${STATUSES.length}`);

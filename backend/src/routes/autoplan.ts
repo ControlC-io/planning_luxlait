@@ -7,10 +7,10 @@ const parseYYYYMMDD = (s: string): Date => new Date(`${s}T00:00:00.000Z`);
 
 const SOLVER_SETTING_KEYS = {
   fairnessWeight: "planning_solver_fairness_weight",
-  leaderWeight: "planning_solver_leader_weight",
   priorityMachineWeight: "planning_solver_priority_machine_weight",
   solveTimeLimitSeconds: "planning_solver_solve_time_limit_seconds",
   enforceTimeSlotWhenAssigned: "planning_solver_enforce_time_slot_when_assigned",
+  closedWeekdays: "planning_closed_weekdays",
 } as const;
 
 function readNumberFromProviderConfig(config: unknown, defaultValue: number): number {
@@ -33,12 +33,38 @@ function readBooleanFromProviderConfig(config: unknown, defaultValue: boolean): 
 
 function isManager(roles: string[] | undefined): boolean {
   const normalized = (roles ?? []).map((r) => String(r).toLowerCase());
-  return normalized.some((r) => r.includes("manager"));
+  return normalized.some((r) => r.includes("manager") || r.includes("admin"));
+}
+
+function parseClosedWeekdays(config: unknown): number[] {
+  const raw = Array.isArray(config)
+    ? config
+    : config && typeof config === "object" && "value" in config
+      ? (config as any).value
+      : [];
+  if (!Array.isArray(raw)) return [];
+  return Array.from(
+    new Set(
+      raw
+        .map((n) => Number(n))
+        .filter((n) => Number.isInteger(n) && n >= 0 && n <= 6)
+    )
+  ).sort((a, b) => a - b);
+}
+
+function listDatesInRange(from: Date, to: Date): string[] {
+  const out: string[] = [];
+  const cur = new Date(from);
+  while (cur <= to) {
+    out.push(cur.toISOString().slice(0, 10));
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return out;
 }
 
 async function getActiveEmployees() {
   return prisma.luxlaitEmployee.findMany({
-    where: { active: true, defaultTeamId: { not: null } },
+    where: { active: true },
     orderBy: { lastName: "asc" },
   });
 }
@@ -46,7 +72,7 @@ async function getActiveEmployees() {
 router.post("/auto_plan", async (req: Request, res: Response) => {
   try {
     if (!isManager(req.userRoles)) {
-      res.status(403).json({ error: "Forbidden: manager role required" });
+      res.status(403).json({ error: "Forbidden: admin or manager role required" });
       return;
     }
 
@@ -55,7 +81,6 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       toDate: string;
       constraints?: {
         fairness_weight?: number;
-        leader_weight?: number;
         priority_machine_weight?: number;
         solve_time_limit_seconds?: number;
         enforce_time_slot_when_assigned?: boolean;
@@ -85,6 +110,7 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       timeSlots,
       unavailableDays,
       machineDowntimes,
+      closedDaysByDate,
       settings,
       existingAssignments,
     ] = await Promise.all([
@@ -99,15 +125,22 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       prisma.luxlaitMachineDowntime.findMany({
         where: { dayDate: { gte: from, lte: to } },
       }),
+      prisma.$queryRawUnsafe<Array<{ day_date: Date }>>(
+        `SELECT day_date
+         FROM luxlait_closed_days
+         WHERE day_date >= $1::date AND day_date <= $2::date`,
+        body.fromDate,
+        body.toDate
+      ),
       prisma.systemSettings.findMany({
         where: {
           settingKey: {
             in: [
               SOLVER_SETTING_KEYS.fairnessWeight,
-              SOLVER_SETTING_KEYS.leaderWeight,
               SOLVER_SETTING_KEYS.priorityMachineWeight,
               SOLVER_SETTING_KEYS.solveTimeLimitSeconds,
               SOLVER_SETTING_KEYS.enforceTimeSlotWhenAssigned,
+              SOLVER_SETTING_KEYS.closedWeekdays,
             ],
           },
         },
@@ -127,10 +160,6 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       settingByKey.get(SOLVER_SETTING_KEYS.fairnessWeight),
       1
     );
-    const dbLeaderWeight = readNumberFromProviderConfig(
-      settingByKey.get(SOLVER_SETTING_KEYS.leaderWeight),
-      100
-    );
     const dbSolveTimeLimitSeconds = readNumberFromProviderConfig(
       settingByKey.get(SOLVER_SETTING_KEYS.solveTimeLimitSeconds),
       30
@@ -144,6 +173,22 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       settingByKey.get(SOLVER_SETTING_KEYS.priorityMachineWeight),
       50
     );
+    const closedWeekdays = parseClosedWeekdays(
+      settingByKey.get(SOLVER_SETTING_KEYS.closedWeekdays)
+    );
+
+    const closedDaySet = new Set<string>(
+      (closedDaysByDate as Array<{ day_date: Date }>).map((d) =>
+        new Date(d.day_date).toISOString().slice(0, 10)
+      )
+    );
+    if (closedWeekdays.length > 0) {
+      const weekdaySet = new Set(closedWeekdays);
+      for (const dateText of listDatesInRange(from, to)) {
+        const day = new Date(`${dateText}T00:00:00.000Z`).getUTCDay();
+        if (weekdaySet.has(day)) closedDaySet.add(dateText);
+      }
+    }
 
     const openShiftsByMachineId: Record<string, string[]> = {};
     for (const os of openShifts) {
@@ -162,8 +207,6 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       to_date: body.toDate,
       employees: employees.map((e) => ({
         id: e.id,
-        default_team_id: e.defaultTeamId,
-        is_team_leader: e.isTeamLeader,
         is_backup: e.isBackup,
       })),
       machines: machines.map((m) => ({
@@ -193,11 +236,10 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
         employee_id: a.employeeId,
         machine_id: a.machineId,
         time_slot_id: a.timeSlotId,
-        team_id: a.teamId,
       })),
+      closed_days: Array.from(closedDaySet).sort(),
       constraints: {
         fairness_weight: body.constraints?.fairness_weight ?? dbFairnessWeight,
-        leader_weight: body.constraints?.leader_weight ?? dbLeaderWeight,
         priority_machine_weight:
           body.constraints?.priority_machine_weight ?? dbPriorityMachineWeight,
         solve_time_limit_seconds:

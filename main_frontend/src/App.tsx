@@ -7,12 +7,12 @@ import { AuthProvider, useAuth } from "@/hooks/useAuth";
 import Login from "./pages/Login";
 import Planning from "./pages/Planning";
 import AppLayout from "./components/AppLayout";
-import TeamsAdmin from "./pages/admin/TeamsAdmin";
 import MachinesAdmin from "./pages/admin/MachinesAdmin";
 import EmployeesAdmin from "./pages/admin/EmployeesAdmin";
 import StatusesAdmin from "./pages/admin/StatusesAdmin";
 import TimeSlotsAdmin from "./pages/admin/TimeSlotsAdmin";
 import SkillsMatrixAdmin from "./pages/admin/SkillsMatrixAdmin";
+import ClosedDaysAdmin from "./pages/admin/ClosedDaysAdmin";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -42,12 +42,12 @@ const AppRoutes = () => (
       }
     >
       <Route path="/" element={<Planning />} />
-      <Route path="/admin/teams" element={<AdminRoute><TeamsAdmin /></AdminRoute>} />
       <Route path="/admin/machines" element={<AdminRoute><MachinesAdmin /></AdminRoute>} />
       <Route path="/admin/employees" element={<AdminRoute><EmployeesAdmin /></AdminRoute>} />
       <Route path="/admin/statuses" element={<AdminRoute><StatusesAdmin /></AdminRoute>} />
       <Route path="/admin/skills" element={<AdminRoute><SkillsMatrixAdmin /></AdminRoute>} />
       <Route path="/admin/timeslots" element={<AdminRoute><TimeSlotsAdmin /></AdminRoute>} />
+      <Route path="/admin/closed-days" element={<AdminRoute><ClosedDaysAdmin /></AdminRoute>} />
     </Route>
     <Route path="*" element={<NotFound />} />
   </Routes>
