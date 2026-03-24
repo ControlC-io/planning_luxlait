@@ -3,7 +3,7 @@
 generator client {
   provider      = "prisma-client-js"
   // Windows (local), linux-musl (Alpine x64), linux-musl-arm64 (Alpine ARM e.g. Docker Desktop ARM)
-  binaryTargets = ["windows", "linux-musl", "linux-musl-arm64-openssl-3.0.x"]
+  binaryTargets = ["windows", "linux-musl", "linux-musl-arm64-openssl-3.0.x", "darwin-arm64"]
 }
 
 datasource db {
@@ -28,6 +28,7 @@ model User {
   sessions          Session[]
   twoFactor         TwoFactor?
   userRoles         UserRole[]
+  luxlaitProfile LuxlaitProfile?
   
   @@map("users")
 }
@@ -157,4 +158,208 @@ model AuditLog {
   timestamp DateTime @default(now())
   
   @@map("audit_logs")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Planning App (Luxlait) - tables previously created via Supabase SQL
+// We model them here so they are managed via Prisma (and Better Auth users).
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum MachineImportance {
+  MANDATORY
+  PRIORITY
+  OPTIONAL
+}
+
+model LuxlaitTeam {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  color     String   @default("#3B82F6")
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  employees            LuxlaitEmployee[]
+  dailyAssignments     LuxlaitDailyAssignment[]
+  teamDailySlots       LuxlaitTeamDailySlot[]
+  weeklyAssignments    LuxlaitWeeklyAssignment[]
+
+  @@map("luxlait_teams")
+}
+
+model LuxlaitEmployee {
+  id              String   @id @default(uuid()) @db.Uuid
+  firstName      String   @map("first_name")
+  lastName       String   @map("last_name")
+  defaultTeamId  String?  @map("default_team_id") @db.Uuid
+  isTeamLeader   Boolean  @default(false) @map("is_team_leader")
+  isBackup        Boolean  @default(false) @map("is_backup")
+  active          Boolean  @default(true)
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  defaultTeam LuxlaitTeam? @relation(fields: [defaultTeamId], references: [id])
+
+  skills                 LuxlaitEmployeeMachineSkill[]
+  dailyAssignments       LuxlaitDailyAssignment[]
+  weeklyEmployeeStatuses LuxlaitWeeklyEmployeeStatus[]
+  weeklyAssignments      LuxlaitWeeklyAssignment[]
+
+  @@map("luxlait_employees")
+}
+
+model LuxlaitMachine {
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String
+  description  String?  // SQL: description text (nullable)
+  sortOrder    Int      @default(0) @map("sort_order")
+  machineGroup String? @map("machine_group")
+  maxEmployees Int      @default(1) @map("max_employees")
+  shortName    String?  @map("short_name")
+  importance   MachineImportance @default(OPTIONAL) @map("importance")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  skills            LuxlaitEmployeeMachineSkill[]
+  openShifts        LuxlaitMachineOpenShift[]
+  dailyAssignments  LuxlaitDailyAssignment[]
+  downtimes         LuxlaitMachineDowntime[]
+  weeklyAssignments LuxlaitWeeklyAssignment[]
+
+  @@map("luxlait_machines")
+}
+
+model LuxlaitTimeSlot {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  color     String   @default("#E5E7EB")
+  sortOrder Int      @default(0) @map("sort_order")
+  shortName String?  @map("short_name")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  dailyAssignments LuxlaitDailyAssignment[]
+  teamDailySlots   LuxlaitTeamDailySlot[]
+  machineOpenShifts LuxlaitMachineOpenShift[]
+
+  @@map("luxlait_time_slots")
+}
+
+model LuxlaitMachineOpenShift {
+  id         String        @id @default(uuid()) @db.Uuid
+  machineId  String        @map("machine_id") @db.Uuid
+  timeSlotId String        @map("time_slot_id") @db.Uuid
+
+  machine  LuxlaitMachine @relation(fields: [machineId], references: [id], onDelete: Cascade)
+  timeSlot LuxlaitTimeSlot @relation(fields: [timeSlotId], references: [id], onDelete: Cascade)
+
+  @@unique([machineId, timeSlotId])
+  @@map("luxlait_machine_open_shifts")
+}
+
+model LuxlaitMachineDowntime {
+  id        String   @id @default(uuid()) @db.Uuid
+  machineId String   @map("machine_id") @db.Uuid
+  dayDate   DateTime @db.Date @map("day_date")
+  reason    String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  machine LuxlaitMachine @relation(fields: [machineId], references: [id], onDelete: Cascade)
+
+  @@unique([machineId, dayDate])
+  @@map("luxlait_machine_downtimes")
+}
+
+model LuxlaitStatus {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  color     String   @default("#9CA3AF")
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  weeklyEmployeeStatuses LuxlaitWeeklyEmployeeStatus[]
+
+  @@map("luxlait_statuses")
+}
+
+// Link Better Auth User -> planning profile (optional)
+model LuxlaitProfile {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @unique @map("user_id")
+  displayName String?  @map("display_name")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("luxlait_profiles")
+}
+
+model LuxlaitEmployeeMachineSkill {
+  id         String  @id @default(uuid()) @db.Uuid
+  employeeId String  @map("employee_id") @db.Uuid
+  machineId  String  @map("machine_id") @db.Uuid
+
+  employee LuxlaitEmployee @relation(fields: [employeeId], references: [id])
+  machine  LuxlaitMachine  @relation(fields: [machineId], references: [id])
+
+  @@unique([employeeId, machineId])
+  @@map("luxlait_employee_machine_skills")
+}
+
+model LuxlaitDailyAssignment {
+  id         String    @id @default(uuid()) @db.Uuid
+  dayDate    DateTime  @db.Date @map("day_date")
+  employeeId String    @map("employee_id") @db.Uuid
+  machineId  String    @map("machine_id") @db.Uuid
+  timeSlotId String?   @map("time_slot_id") @db.Uuid
+  teamId     String    @map("team_id") @db.Uuid
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  employee  LuxlaitEmployee @relation(fields: [employeeId], references: [id])
+  machine   LuxlaitMachine  @relation(fields: [machineId], references: [id])
+  timeSlot  LuxlaitTimeSlot? @relation(fields: [timeSlotId], references: [id])
+  team      LuxlaitTeam     @relation(fields: [teamId], references: [id])
+
+  @@unique([dayDate, employeeId])
+  @@map("luxlait_daily_assignments")
+}
+
+model LuxlaitTeamDailySlot {
+  id         String   @id @default(uuid()) @db.Uuid
+  teamId     String   @map("team_id") @db.Uuid
+  dayDate    DateTime @db.Date @map("day_date")
+  timeSlotId String   @map("time_slot_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  team      LuxlaitTeam     @relation(fields: [teamId], references: [id])
+  timeSlot  LuxlaitTimeSlot @relation(fields: [timeSlotId], references: [id])
+
+  @@map("luxlait_team_daily_slots")
+}
+
+model LuxlaitWeeklyAssignment {
+  id         String   @id @default(uuid()) @db.Uuid
+  weekStart  DateTime @db.Date @map("week_start")
+  teamId     String   @map("team_id") @db.Uuid
+  machineId  String   @map("machine_id") @db.Uuid
+  employeeId String   @map("employee_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  team     LuxlaitTeam     @relation(fields: [teamId], references: [id])
+  machine  LuxlaitMachine  @relation(fields: [machineId], references: [id])
+  employee LuxlaitEmployee @relation(fields: [employeeId], references: [id])
+
+  @@map("luxlait_weekly_assignments")
+}
+
+model LuxlaitWeeklyEmployeeStatus {
+  id         String   @id @default(uuid()) @db.Uuid
+  employeeId String   @map("employee_id") @db.Uuid
+  statusId   String   @map("status_id") @db.Uuid
+  dayDate    DateTime @db.Date @map("day_date")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  employee LuxlaitEmployee @relation(fields: [employeeId], references: [id])
+  status   LuxlaitStatus   @relation(fields: [statusId], references: [id])
+
+  @@unique([dayDate, employeeId])
+  @@map("luxlait_weekly_employee_statuses")
 }

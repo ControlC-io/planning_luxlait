@@ -14,7 +14,7 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-myrtest}
+      POSTGRES_DB: ${POSTGRES_DB:-luxlait_db}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -47,6 +47,8 @@ services:
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-8h}
       EMAIL_SERVICE_URL: ${EMAIL_SERVICE_URL:-http://email_service:3001}
       EMAIL_SERVICE_SECRET: ${EMAIL_SERVICE_SECRET}
+      SOLVER_SERVICE_URL: ${SOLVER_SERVICE_URL:-http://solver_service:8000}
+      SOLVER_SERVICE_SECRET: ${SOLVER_SERVICE_SECRET}
     volumes:
       - ./backend:/app
       - /app/node_modules
@@ -59,6 +61,8 @@ services:
       postgres:
         condition: service_healthy
       email_service:
+        condition: service_started
+      solver_service:
         condition: service_started
     restart: unless-stopped
 
@@ -106,6 +110,17 @@ services:
     volumes:
       - ./email_service:/app
       - /app/node_modules
+    networks:
+      - internal_net
+    restart: unless-stopped
+
+  solver_service:
+    build:
+      context: ./solver_service
+      dockerfile: Dockerfile
+    container_name: solver_service
+    environment:
+      SOLVER_SERVICE_SECRET: ${SOLVER_SERVICE_SECRET}
     networks:
       - internal_net
     restart: unless-stopped

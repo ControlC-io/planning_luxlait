@@ -56,6 +56,13 @@ export const jwtAuth = async (
   res: Response,
   next: NextFunction
 ): Promise<void> => {
+  // Allow CORS preflight requests to complete without requiring auth.
+  // The `cors()` middleware already runs earlier and will set the required headers.
+  if (req.method === "OPTIONS") {
+    res.sendStatus(204);
+    return;
+  }
+
   if (isPublicRoute(req.method, req.path)) {
     return next();
   }

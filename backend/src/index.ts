@@ -16,6 +16,8 @@ import betterAuthProxyRouter from './routes/betterAuthProxy';
 import adminRouter from './routes/admin';
 import rolesRouter from './routes/roles';
 import counterRouter from './routes/counter';
+import planningRouter from './routes/planning';
+import autoPlanRouter from './routes/autoplan';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -107,6 +109,10 @@ app.use(jwtAuth);
 
 // ─── Counter Routes (JWT protected) ──────────────────────────────────────────
 app.use('/api/counter', counterRouter);
+
+// ─── Planning Routes (JWT protected) ───────────────────────────────────────
+app.use('/api/planning', planningRouter);
+app.use('/api/planning', autoPlanRouter);
 
 // ─── Admin API Routes (x-admin-secret auth; jwtAuth skips /api/admin via PUBLIC_ROUTES) ─
 app.use('/api/admin', adminAuth);

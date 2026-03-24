@@ -74,10 +74,69 @@ const seedRoles = async () => {
   console.log('Default roles seeded successfully!');
 };
 
+const seedPlanningRbac = async () => {
+  console.log('Seeding RBAC for planning endpoints...');
+
+  const adminRole = await prisma.role.findUnique({ where: { name: 'Admin User' } });
+  const managerRole = await prisma.role.findUnique({ where: { name: 'Manager' } });
+
+  if (!adminRole || !managerRole) {
+    console.log('  Skipping planning RBAC seeding (roles not found yet).');
+    return;
+  }
+
+  const endpoint = '/api/planning';
+  const method = '*';
+
+  const ensureMapping = async (roleId: string) => {
+    const existing = await prisma.roleEndpointMapping.findUnique({
+      where: {
+        roleId_endpoint_method: {
+          roleId,
+          endpoint,
+          method,
+        },
+      },
+    });
+
+    if (!existing) {
+      await prisma.roleEndpointMapping.create({
+        data: { roleId, endpoint, method },
+      });
+      console.log(`  + Created endpoint mapping for role ${roleId}: ${method} ${endpoint}`);
+    }
+  };
+
+  await ensureMapping(adminRole.id);
+  await ensureMapping(managerRole.id);
+
+  console.log('Seeding user role assignments for planning...');
+  const managerId = managerRole.id;
+  const users = await prisma.user.findMany({ select: { id: true } });
+
+  for (const u of users) {
+    const existing = await prisma.userRole.findUnique({
+      where: {
+        userId_roleId: {
+          userId: u.id,
+          roleId: managerId,
+        },
+      },
+    });
+
+    if (!existing) {
+      await prisma.userRole.create({
+        data: { userId: u.id, roleId: managerId },
+      });
+    }
+  }
+};
+
 const main = async () => {
   try {
     await seedAuthSettings();
     await seedRoles();
+    await seedPlanningRbac();
   } catch (error) {
     console.error('Error seeding database:', error);
     process.exit(1);

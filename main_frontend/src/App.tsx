@@ -1,33 +1,70 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import { AuthProvider } from '@shared/auth';
-import Login from './pages/Login';
-import Register from './pages/Register';
-import Dashboard from './pages/Dashboard';
-import Home from './pages/Home';
-import TwoFactorChallenge from './pages/TwoFactorChallenge';
-import EmailOtpChallenge from './pages/EmailOtpChallenge';
-import Navbar from './components/Navbar';
+import { Toaster } from "@/components/ui/toaster";
+import { Toaster as Sonner } from "@/components/ui/sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { AuthProvider, useAuth } from "@/hooks/useAuth";
+import Login from "./pages/Login";
+import Planning from "./pages/Planning";
+import AppLayout from "./components/AppLayout";
+import TeamsAdmin from "./pages/admin/TeamsAdmin";
+import MachinesAdmin from "./pages/admin/MachinesAdmin";
+import EmployeesAdmin from "./pages/admin/EmployeesAdmin";
+import StatusesAdmin from "./pages/admin/StatusesAdmin";
+import TimeSlotsAdmin from "./pages/admin/TimeSlotsAdmin";
+import SkillsMatrixAdmin from "./pages/admin/SkillsMatrixAdmin";
+import NotFound from "./pages/NotFound";
 
-const App = () => {
-  return (
-    <BrowserRouter>
-      <AuthProvider>
-        <div className="min-h-screen flex flex-col bg-gray-50">
-          <Navbar />
-          <main className="flex-1">
-            <Routes>
-              <Route path="/" element={<Home />} />
-              <Route path="/login" element={<Login />} />
-              <Route path="/register" element={<Register />} />
-              <Route path="/dashboard" element={<Dashboard />} />
-              <Route path="/auth/2fa-challenge" element={<TwoFactorChallenge />} />
-              <Route path="/auth/email-otp" element={<EmailOtpChallenge />} />
-            </Routes>
-          </main>
-        </div>
-      </AuthProvider>
-    </BrowserRouter>
-  );
-};
+const queryClient = new QueryClient();
+
+function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  const { user, loading } = useAuth();
+  if (loading) return <div className="flex min-h-screen items-center justify-center">Chargement...</div>;
+  if (!user) return <Navigate to="/login" replace />;
+  return <>{children}</>;
+}
+
+function AdminRoute({ children }: { children: React.ReactNode }) {
+  const { isAdmin, isManager, loading } = useAuth();
+  if (loading) return <div className="flex min-h-screen items-center justify-center">Chargement...</div>;
+  if (!isAdmin && !isManager) return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
+
+const AppRoutes = () => (
+  <Routes>
+    <Route path="/login" element={<Login />} />
+    <Route
+      element={
+        <ProtectedRoute>
+          <AppLayout />
+        </ProtectedRoute>
+      }
+    >
+      <Route path="/" element={<Planning />} />
+      <Route path="/admin/teams" element={<AdminRoute><TeamsAdmin /></AdminRoute>} />
+      <Route path="/admin/machines" element={<AdminRoute><MachinesAdmin /></AdminRoute>} />
+      <Route path="/admin/employees" element={<AdminRoute><EmployeesAdmin /></AdminRoute>} />
+      <Route path="/admin/statuses" element={<AdminRoute><StatusesAdmin /></AdminRoute>} />
+      <Route path="/admin/skills" element={<AdminRoute><SkillsMatrixAdmin /></AdminRoute>} />
+      <Route path="/admin/timeslots" element={<AdminRoute><TimeSlotsAdmin /></AdminRoute>} />
+    </Route>
+    <Route path="*" element={<NotFound />} />
+  </Routes>
+);
+
+const App = () => (
+  <QueryClientProvider client={queryClient}>
+    <TooltipProvider>
+      <Toaster />
+      <Sonner />
+      <BrowserRouter>
+        <AuthProvider>
+          <AppRoutes />
+        </AuthProvider>
+      </BrowserRouter>
+    </TooltipProvider>
+  </QueryClientProvider>
+);
 
 export default App;

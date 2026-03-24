@@ -12,6 +12,7 @@
     "prisma:push": "prisma db push",
     "prisma:studio": "prisma studio",
     "seed": "ts-node src/scripts/seed.ts",
+    "seed:planning": "ts-node src/scripts/seed-planning.ts",
     "test:auth": "ts-node src/scripts/test-auth.ts"
   },
   "dependencies": {
