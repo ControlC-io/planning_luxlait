@@ -54,6 +54,9 @@ export default function Planning() {
   const [autoPlanApproveLoading, setAutoPlanApproveLoading] = useState(false);
   const [autoPlanProposedAssignments, setAutoPlanProposedAssignments] = useState<DailyAssignment[]>([]);
   const [autoPlanStats, setAutoPlanStats] = useState<Record<string, unknown> | null>(null);
+  const [replanFormOpen, setReplanFormOpen] = useState(false);
+  const [replanFromDate, setReplanFromDate] = useState(() => format(new Date(), "yyyy-MM-dd"));
+  const [replanLoading, setReplanLoading] = useState(false);
   const [viewMode, setViewMode] = useState<"employee" | "machine">("employee");
   const [previewViewMode, setPreviewViewMode] = useState<"employee" | "machine">("employee");
   const [mainViewRangeMode, setMainViewRangeMode] = useState<"month" | "week">("month");
@@ -136,6 +139,11 @@ export default function Planning() {
   useEffect(() => {
     setAutoPlanFromDate(monthStart);
     setAutoPlanToDate(monthEnd);
+    const today = new Date();
+    const isCurrentDisplayedMonth =
+      today.getFullYear() === currentMonth.getFullYear() &&
+      today.getMonth() === currentMonth.getMonth();
+    setReplanFromDate(isCurrentDisplayedMonth ? format(today, "yyyy-MM-dd") : monthStart);
   }, [monthStart, monthEnd]);
   useEffect(() => {
     const today = new Date();
@@ -453,6 +461,72 @@ export default function Planning() {
     }
   };
 
+  const requestReplan = async () => {
+    if (!canUseAutoPlan) return;
+
+    const token = localStorage.getItem(JWT_STORAGE_KEY);
+    if (!token) {
+      toast({ title: "Authentication required", description: "Please sign in again.", variant: "destructive" });
+      return;
+    }
+
+    const replanDate = parseISO(replanFromDate);
+    if (Number.isNaN(replanDate.getTime())) {
+      toast({ title: "Date invalide", description: "Choisissez une date valide.", variant: "destructive" });
+      return;
+    }
+
+    const monthStartDate = parseISO(monthStart);
+    const monthEndDate = parseISO(monthEnd);
+    if (replanDate < monthStartDate || replanDate > monthEndDate) {
+      toast({ title: "Date hors limites", description: "La date doit être dans le mois courant.", variant: "destructive" });
+      return;
+    }
+
+    setReplanLoading(true);
+    try {
+      const response = await fetch("/api/planning/auto_plan", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          replanFromDate: replanFromDate,
+        }),
+      });
+
+      const json = await response.json();
+      if (!response.ok || !json?.ok) {
+        toast({
+          title: "Re-Plan failed",
+          description: json?.error ? String(json.error) : "Solver returned an error",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const proposed = (json.assignments ?? []).map((a: any) => ({
+        id: `preview_${a.employee_id}_${a.day_date}`,
+        day_date: a.day_date,
+        employee_id: a.employee_id,
+        machine_id: a.machine_id,
+        time_slot_id: a.time_slot_id ?? null,
+      })) as DailyAssignment[];
+
+      setAutoPlanFromDate(replanFromDate);
+      setAutoPlanToDate(monthEnd);
+      setAutoPlanProposedAssignments(proposed);
+      setAutoPlanStats(json.stats ?? null);
+      setAutoPlanPreviewOpen(true);
+      setReplanFormOpen(false);
+    } catch (e) {
+      toast({ title: "Network error", description: e instanceof Error ? e.message : "Request failed", variant: "destructive" });
+    } finally {
+      setReplanLoading(false);
+    }
+  };
+
   const approveAutoPlan = async () => {
     const token = localStorage.getItem(JWT_STORAGE_KEY);
     if (!token) return;
@@ -470,7 +544,7 @@ export default function Planning() {
             day_date: a.day_date,
             employee_id: a.employee_id,
             machine_id: a.machine_id,
-            time_slot_id: a.time_slot_id,
+            time_slot_id: a.time_slot_id || null,
           })),
         }),
       });
@@ -479,7 +553,11 @@ export default function Planning() {
       if (!response.ok || !json?.ok) {
         toast({
           title: "Save failed",
-          description: json?.error ? String(json.error) : "Bulk upsert returned an error",
+          description: json?.detail
+            ? `${String(json.error ?? "Bulk upsert returned an error")} (${String(json.detail)})`
+            : json?.error
+              ? String(json.error)
+              : "Bulk upsert returned an error",
           variant: "destructive",
         });
         return;
@@ -546,6 +624,11 @@ export default function Planning() {
         {canUseAutoPlan && (
           <Button variant="outline" size="sm" onClick={() => setAutoPlanFormOpen(true)} disabled={autoPlanLoading}>
             Auto Plan
+          </Button>
+        )}
+        {canUseAutoPlan && dailyAssignments.length > 0 && (
+          <Button variant="outline" size="sm" onClick={() => setReplanFormOpen(true)} disabled={replanLoading}>
+            Re-Plan
           </Button>
         )}
         <ToggleGroup
@@ -729,6 +812,41 @@ export default function Planning() {
           </Button>
           <Button onClick={requestAutoPlan} disabled={autoPlanLoading}>
             {autoPlanLoading ? "Solving..." : "Run Auto Plan"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    {/* Re-Plan form dialog */}
+    <Dialog open={replanFormOpen} onOpenChange={setReplanFormOpen}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Re-Plan</DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div className="text-sm text-muted-foreground">
+            Re-calculer le planning à partir d'une date. Les assignations avant cette date sont verrouillées. Le solveur minimise les changements par rapport au planning actuel.
+          </div>
+          <div className="space-y-1">
+            <div className="text-xs font-medium text-muted-foreground">Re-planifier à partir du</div>
+            <Input
+              type="date"
+              value={replanFromDate}
+              min={monthStart}
+              max={monthEnd}
+              onChange={(e) => setReplanFromDate(e.target.value)}
+              disabled={replanLoading}
+            />
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setReplanFormOpen(false)} disabled={replanLoading}>
+            Cancel
+          </Button>
+          <Button onClick={requestReplan} disabled={replanLoading}>
+            {replanLoading ? "Solving..." : "Run Re-Plan"}
           </Button>
         </DialogFooter>
       </DialogContent>

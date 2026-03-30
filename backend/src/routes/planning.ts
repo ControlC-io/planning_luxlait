@@ -1,4 +1,5 @@
 import express, { Request, Response } from 'express';
+import { randomUUID } from 'crypto';
 import prisma from '../lib/prisma';
 
 const router = express.Router();
@@ -414,33 +415,53 @@ router.post('/luxlait_daily_assignments/bulk_upsert', async (req: Request, res: 
 
     const rows = Array.isArray(body?.rows) ? body.rows : [];
 
-    await prisma.$transaction(
-      rows.map((r) =>
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (prisma.luxlaitDailyAssignment as any).upsert({
-          where: {
-            dayDate_employeeId: {
-              dayDate: parseYYYYMMDD(r.day_date),
-              employeeId: r.employee_id,
-            },
-          },
-          update: {
-            machineId: r.machine_id,
-            timeSlotId: r.time_slot_id ?? null,
-          },
-          create: {
-            dayDate: parseYYYYMMDD(r.day_date),
-            employeeId: r.employee_id,
-            machineId: r.machine_id,
-            timeSlotId: r.time_slot_id ?? null,
-          },
-        })
-      )
-    );
+    if (rows.length === 0) {
+      res.json({ ok: true });
+      return;
+    }
+
+    // Deduplicate: keep last occurrence per (day_date, employee_id)
+    const deduped = [
+      ...new Map(rows.map((r) => [`${r.day_date}|${r.employee_id}`, r])).values(),
+    ];
+
+    // Use raw SQL with ON CONFLICT for bulk performance instead of
+    // individual Prisma upserts which can timeout on large batches.
+    const CHUNK_SIZE = 200;
+    for (let i = 0; i < deduped.length; i += CHUNK_SIZE) {
+      const chunk = deduped.slice(i, i + CHUNK_SIZE);
+
+      const values = chunk.map(
+        (_, idx) =>
+          `($${idx * 5 + 1}::uuid, $${idx * 5 + 2}::date, $${idx * 5 + 3}::uuid, $${idx * 5 + 4}::uuid, $${idx * 5 + 5}::uuid)`
+      );
+
+      const params = chunk.flatMap((r) => [
+        randomUUID(),
+        r.day_date,
+        r.employee_id,
+        r.machine_id,
+        r.time_slot_id || null,
+      ]);
+
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO luxlait_daily_assignments (id, day_date, employee_id, machine_id, time_slot_id, team_id)
+         SELECT v.id, v.day_date, v.employee_id, v.machine_id, v.time_slot_id, e.default_team_id
+         FROM (VALUES ${values.join(', ')}) AS v(id, day_date, employee_id, machine_id, time_slot_id)
+         INNER JOIN luxlait_employees e ON e.id = v.employee_id
+         ON CONFLICT (day_date, employee_id)
+         DO UPDATE SET machine_id = EXCLUDED.machine_id,
+                       time_slot_id = EXCLUDED.time_slot_id,
+                       team_id = EXCLUDED.team_id`,
+        ...params
+      );
+    }
 
     res.json({ ok: true });
-  } catch {
-    res.status(500).json({ error: 'Failed to bulk upsert daily assignments' });
+  } catch (err) {
+    console.error('Failed to bulk upsert daily assignments:', err);
+    const detail = err instanceof Error ? err.message : undefined;
+    res.status(500).json({ error: 'Failed to bulk upsert daily assignments', detail });
   }
 });
 

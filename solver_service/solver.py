@@ -435,6 +435,29 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
 
                     model.add(sum(night_lits) + sum(morning_lits_next) <= 1)
 
+        # ── Stability objective (re-plan): prefer keeping reference assignments ─
+        stability_keep_vars: List[cp_model.IntVar] = []
+        if req.reference_assignments and req.constraints.stability_weight > 0:
+            ref_by_emp_day: Dict[Tuple[str, dt.date], ExistingAssignmentInput] = {}
+            for ra in req.reference_assignments:
+                rd = _parse_date_yyyy_mm_dd(ra.day_date)
+                if ra.employee_id in employee_id_set and rd in days_set:
+                    ref_by_emp_day[(ra.employee_id, rd)] = ra
+
+            for (e_id, d), ra in ref_by_emp_day.items():
+                if (e_id, d) in locked_emp_days:
+                    continue
+
+                if (e_id, d, ra.machine_id) in x:
+                    keep_m = model.new_bool_var(f"keep_m_e{e_id}_d{d.isoformat()}")
+                    model.add(keep_m == x[(e_id, d, ra.machine_id)])
+                    stability_keep_vars.append(keep_m)
+
+                if ra.time_slot_id and (e_id, d, ra.time_slot_id) in t:
+                    keep_ts = model.new_bool_var(f"keep_ts_e{e_id}_d{d.isoformat()}")
+                    model.add(keep_ts == t[(e_id, d, ra.time_slot_id)])
+                    stability_keep_vars.append(keep_ts)
+
         # ── Fairness objective ───────────────────────────────────────────────
         totals: Dict[str, cp_model.IntVar] = {}
         for e_id in employee_ids:
@@ -460,13 +483,16 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
 
         fairness_weight = req.constraints.fairness_weight
         priority_weight = req.constraints.priority_machine_weight
+        stability_weight = req.constraints.stability_weight
 
         priority_shift_covered_sum = (
             sum(priority_shift_covered_vars) if priority_shift_covered_vars else 0
         )
+        stability_bonus = sum(stability_keep_vars) if stability_keep_vars else 0
         objective = (
             fairness_weight * fairness_cost
             - priority_weight * priority_shift_covered_sum
+            - stability_weight * stability_bonus
         )
         model.minimize(objective)
 
@@ -547,6 +573,7 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                 "solverStatus": str(solver.status_name(status)),
                 "durationMs": duration_ms,
                 "lockedAssignments": len(locked),
+                "referenceAssignments": len(stability_keep_vars),
             },
         )
     except Exception as e:  # noqa: BLE001

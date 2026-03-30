@@ -48,6 +48,7 @@ class ConstraintsInput(BaseModel):
     # Objective weights
     fairness_weight: int = Field(default=1, ge=0)
     priority_machine_weight: int = Field(default=50, ge=0)
+    stability_weight: int = Field(default=0, ge=0)
 
     # Solver behavior
     solve_time_limit_seconds: int = Field(default=30, ge=1, le=3600)
@@ -71,6 +72,10 @@ class SolveRequest(BaseModel):
 
     # Optional lock-in for already confirmed days
     existing_assignments: List[ExistingAssignmentInput] = []
+
+    # Soft reference for re-planning: the solver will try to stay close to
+    # these assignments but is free to deviate when necessary.
+    reference_assignments: List[ExistingAssignmentInput] = []
 
     # Days where planning must stay empty
     closed_days: List[str] = []
