@@ -21,7 +21,7 @@ type DailyAssignment = { id: string; day_date: string; employee_id: string; mach
 type EmployeeStatus = { id: string; day_date: string; employee_id: string; status_id: string };
 type Skill = { employee_id: string; machine_id: string };
 type TimeSlot = { id: string; name: string; short_name: string | null; color: string; sort_order: number };
-type ClosedDay = { id: string; day_date: string; reason: string | null };
+type MachineDowntimeRow = { machine_id: string; day_date: string };
 
 const DAY_ABBR = ["D", "L", "M", "M", "J", "V", "S"];
 const JWT_STORAGE_KEY = "myrtest_jwt_token";
@@ -39,8 +39,7 @@ export default function Planning() {
   const [empStatuses, setEmpStatuses] = useState<EmployeeStatus[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [timeSlots, setTimeSlots] = useState<TimeSlot[]>([]);
-  const [closedDays, setClosedDays] = useState<ClosedDay[]>([]);
-  const [closedWeekdays, setClosedWeekdays] = useState<number[]>([]);
+  const [machineDowntimes, setMachineDowntimes] = useState<MachineDowntimeRow[]>([]);
 
   const monthStart = format(currentMonth, "yyyy-MM-dd");
   const monthEnd = format(endOfMonth(currentMonth), "yyyy-MM-dd");
@@ -91,47 +90,17 @@ export default function Planning() {
     setSkills((sk.data as any) ?? []);
     setTimeSlots((ts.data as any) ?? []);
 
-    try {
-      const token = localStorage.getItem(JWT_STORAGE_KEY);
-      if (!token) return;
-      const res = await fetch("/api/planning/luxlait_closed_weekdays", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const json = await res.json().catch(() => ({}));
-      if (res.ok && Array.isArray(json?.weekdays)) {
-        setClosedWeekdays(json.weekdays);
-      }
-    } catch {
-      // keep planning usable if closed day config cannot be loaded
-    }
   };
 
   const fetchMonthData = async () => {
-    const [a, es] = await Promise.all([
+    const [a, es, dt] = await Promise.all([
       supabase.from("luxlait_daily_assignments" as any).select("*").gte("day_date", monthStart).lte("day_date", monthEnd),
       supabase.from("luxlait_weekly_employee_statuses" as any).select("*").gte("day_date", monthStart).lte("day_date", monthEnd),
+      supabase.from("luxlait_machine_downtimes" as any).select("machine_id, day_date").gte("day_date", monthStart).lte("day_date", monthEnd),
     ]);
     setDailyAssignments((a.data as any) ?? []);
     setEmpStatuses((es.data as any) ?? []);
-
-    try {
-      const token = localStorage.getItem(JWT_STORAGE_KEY);
-      if (!token) return;
-      const url = new URL("/api/planning/luxlait_closed_days", window.location.origin);
-      url.searchParams.set("fromDate", monthStart);
-      url.searchParams.set("toDate", monthEnd);
-      const res = await fetch(url.toString(), {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const json = await res.json().catch(() => []);
-      if (res.ok && Array.isArray(json)) {
-        setClosedDays(json as ClosedDay[]);
-      } else {
-        setClosedDays([]);
-      }
-    } catch {
-      setClosedDays([]);
-    }
+    setMachineDowntimes((dt.data as MachineDowntimeRow[]) ?? []);
   };
 
   useEffect(() => { fetchAll(); }, []);
@@ -210,14 +179,11 @@ export default function Planning() {
     return m;
   }, [timeSlots]);
 
-  const closedDaySet = useMemo(() => new Set(closedDays.map((d) => d.day_date)), [closedDays]);
-
-  const isClosedDay = (day: string): boolean => {
-    if (closedDaySet.has(day)) return true;
-    if (!closedWeekdays.length) return false;
-    const weekDay = new Date(`${day}T00:00:00`).getDay();
-    return closedWeekdays.includes(weekDay);
-  };
+  const machineDowntimeKeySet = useMemo(() => {
+    const s = new Set<string>();
+    machineDowntimes.forEach((d) => s.add(`${d.machine_id}_${d.day_date}`));
+    return s;
+  }, [machineDowntimes]);
 
   const skillSet = useMemo(() => {
     const s = new Set<string>();
@@ -710,15 +676,13 @@ export default function Planning() {
                 const dayNum = d.getDate();
                 const dayOfWeek = d.getDay();
                 const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-                const closed = isClosedDay(day);
                 return (
                   <th
                     key={day}
-                    className={`p-1 text-center font-medium min-w-[60px] ${isWeekend ? "bg-muted" : ""} ${closed ? "bg-red-50" : ""}`}
+                    className={`p-1 text-center font-medium min-w-[60px] ${isWeekend ? "bg-muted" : ""}`}
                   >
                     <div className="text-muted-foreground text-[9px]">{DAY_ABBR[dayOfWeek]}</div>
                     <div className="text-xs">{dayNum}</div>
-                    {closed ? <div className="text-[9px] text-red-600">Fermé</div> : null}
                   </th>
                 );
               })}
@@ -749,7 +713,10 @@ export default function Planning() {
                       statuses={statuses}
                       machineMap={machineMap}
                       timeSlotMap={timeSlotMap}
-                      qualifiedMachines={getQualifiedMachines(emp.id)}
+                      qualifiedMachines={getQualifiedMachines(emp.id).filter(
+                        (m) => !machineDowntimeKeySet.has(`${m.id}_${day}`)
+                      )}
+                      machineDowntimeKeySet={machineDowntimeKeySet}
                       timeSlots={timeSlots}
                       onAssign={handleAssign}
                       onSetStatus={handleSetDayStatus}
@@ -768,6 +735,7 @@ export default function Planning() {
           getAssignments={(key) => filteredAssignmentsByMachineDay.get(key) ?? []}
           employeeMap={employeeMap}
           timeSlotMap={timeSlotMap}
+          machineDowntimeKeySet={machineDowntimeKeySet}
           spacious={false}
         />
       )}
@@ -979,7 +947,10 @@ export default function Planning() {
                           statuses={statuses}
                           machineMap={machineMap}
                           timeSlotMap={timeSlotMap}
-                          qualifiedMachines={getQualifiedMachines(emp.id)}
+                          qualifiedMachines={getQualifiedMachines(emp.id).filter(
+                            (m) => !machineDowntimeKeySet.has(`${m.id}_${day}`)
+                          )}
+                          machineDowntimeKeySet={machineDowntimeKeySet}
                           timeSlots={timeSlots}
                           onAssign={(_empId, _day, _machineId, _timeSlotId) => undefined}
                           onSetStatus={(_empId, _day, _statusId) => undefined}
@@ -1001,6 +972,7 @@ export default function Planning() {
               getExistingAssignments={(key) => filteredAssignmentsByMachineDay.get(key) ?? []}
               employeeMap={employeeMap}
               timeSlotMap={timeSlotMap}
+              machineDowntimeKeySet={machineDowntimeKeySet}
               showChanges
               spacious
             />
@@ -1037,6 +1009,7 @@ function PlanningCell({
   machineMap,
   timeSlotMap,
   qualifiedMachines,
+  machineDowntimeKeySet,
   timeSlots,
   onAssign,
   onSetStatus,
@@ -1054,6 +1027,7 @@ function PlanningCell({
   machineMap: Map<string, Machine>;
   timeSlotMap: Map<string, TimeSlot>;
   qualifiedMachines: Machine[];
+  machineDowntimeKeySet: Set<string>;
   timeSlots: TimeSlot[];
   onAssign: (empId: string, day: string, machineId: string | null, timeSlotId: string | null) => void;
   onSetStatus: (empId: string, day: string, statusId: string | null) => void;
@@ -1066,6 +1040,9 @@ function PlanningCell({
   const assignedMachineIsQualified = assignment
     ? qualifiedMachines.some((m) => m.id === assignment.machine_id)
     : true;
+  const machineOnDowntime = assignment
+    ? machineDowntimeKeySet.has(`${assignment.machine_id}_${dayDate}`)
+    : false;
 
   const cellBg = status
     ? status.color
@@ -1153,13 +1130,14 @@ function PlanningCell({
                   {qualifiedMachines.map((m) => (
                     <SelectItem key={m.id} value={m.id} className="text-xs">{m.name}</SelectItem>
                   ))}
-                  {assignment && machine && !assignedMachineIsQualified && (
+                  {assignment && machine && (!assignedMachineIsQualified || machineOnDowntime) && (
                     <SelectItem
                       value={machine.id}
                       className="text-xs opacity-60"
                       disabled
                     >
                       {machine.name} (current)
+                      {machineOnDowntime ? " — arrêt" : ""}
                     </SelectItem>
                   )}
                   {qualifiedMachines.length === 0 && (
@@ -1238,6 +1216,7 @@ function MachineGrid({
   getExistingAssignments,
   employeeMap,
   timeSlotMap,
+  machineDowntimeKeySet,
   showChanges,
   spacious,
 }: {
@@ -1247,6 +1226,7 @@ function MachineGrid({
   getExistingAssignments?: (key: string) => DailyAssignment[];
   employeeMap: Map<string, Employee>;
   timeSlotMap: Map<string, TimeSlot>;
+  machineDowntimeKeySet: Set<string>;
   showChanges?: boolean;
   spacious?: boolean;
 }) {
@@ -1318,6 +1298,7 @@ function MachineGrid({
                         employeeMap={employeeMap}
                         timeSlotMap={timeSlotMap}
                         isWeekend={isWeekend}
+                        isDowntime={machineDowntimeKeySet.has(`${machine.id}_${day}`)}
                         isProposedChange={isProposedChange}
                         spacious={spacious}
                       />
@@ -1338,6 +1319,7 @@ function MachineDayCell({
   employeeMap,
   timeSlotMap,
   isWeekend,
+  isDowntime,
   isProposedChange,
   spacious,
 }: {
@@ -1345,16 +1327,24 @@ function MachineDayCell({
   employeeMap: Map<string, Employee>;
   timeSlotMap: Map<string, TimeSlot>;
   isWeekend: boolean;
+  isDowntime: boolean;
   isProposedChange?: boolean;
   spacious?: boolean;
 }) {
+  const bgStyle: React.CSSProperties = {};
+  if (isWeekend) bgStyle.backgroundColor = "hsl(var(--muted))";
+  if (isDowntime) bgStyle.backgroundColor = "hsl(var(--muted) / 0.85)";
+
   return (
     <td
-      className={`p-0 text-center border-r border-border/30 ${isProposedChange ? "ring-1 ring-primary/70 ring-inset" : ""}`}
-      style={isWeekend ? { backgroundColor: "hsl(var(--muted))" } : {}}
+      className={`p-0 text-center border-r border-border/30 ${isProposedChange ? "ring-1 ring-primary/70 ring-inset" : ""} ${isDowntime ? "text-muted-foreground" : ""}`}
+      style={Object.keys(bgStyle).length ? bgStyle : undefined}
+      title={isDowntime ? "Machine à l’arrêt ce jour" : undefined}
     >
       <div className={`flex flex-col items-center justify-center gap-1 ${spacious ? "min-h-[44px] py-1" : "min-h-[32px] py-0.5"}`}>
-        {assignments.length === 0 ? (
+        {isDowntime && assignments.length === 0 ? (
+          <span className={`text-amber-700/90 ${spacious ? "text-[10px]" : "text-[8px]"} font-medium`}>Arrêt</span>
+        ) : assignments.length === 0 ? (
           <span className={`text-muted-foreground ${spacious ? "text-xs" : "text-[9px]"}`}>&middot;</span>
         ) : (
           assignments.map((a) => {

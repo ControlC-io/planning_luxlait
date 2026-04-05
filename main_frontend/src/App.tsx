@@ -12,7 +12,7 @@ import EmployeesAdmin from "./pages/admin/EmployeesAdmin";
 import StatusesAdmin from "./pages/admin/StatusesAdmin";
 import TimeSlotsAdmin from "./pages/admin/TimeSlotsAdmin";
 import SkillsMatrixAdmin from "./pages/admin/SkillsMatrixAdmin";
-import ClosedDaysAdmin from "./pages/admin/ClosedDaysAdmin";
+import EmployeeDayOffsAdmin from "./pages/admin/EmployeeDayOffsAdmin";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -47,7 +47,7 @@ const AppRoutes = () => (
       <Route path="/admin/statuses" element={<AdminRoute><StatusesAdmin /></AdminRoute>} />
       <Route path="/admin/skills" element={<AdminRoute><SkillsMatrixAdmin /></AdminRoute>} />
       <Route path="/admin/timeslots" element={<AdminRoute><TimeSlotsAdmin /></AdminRoute>} />
-      <Route path="/admin/closed-days" element={<AdminRoute><ClosedDaysAdmin /></AdminRoute>} />
+      <Route path="/admin/employee-day-offs" element={<AdminRoute><EmployeeDayOffsAdmin /></AdminRoute>} />
     </Route>
     <Route path="*" element={<NotFound />} />
   </Routes>

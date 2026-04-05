@@ -106,12 +106,6 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
             u_day = _parse_date_yyyy_mm_dd(u.day_date)
             unavailable.add((u.employee_id, u_day))
 
-        closed_days: Set[dt.date] = {
-            _parse_date_yyyy_mm_dd(day)
-            for day in (req.closed_days or [])
-            if isinstance(day, str) and day.strip()
-        }
-
         qualified_for_machine: Dict[str, Set[str]] = {m_id: set() for m_id in machine_ids}
         for sk in req.skills:
             if sk.machine_id in qualified_for_machine:
@@ -130,14 +124,6 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
 
         # Validate locked assignments against machine downtime and open shift rules.
         for (e_id, d), a in locked.items():
-            if d in closed_days:
-                return SolveResponse(
-                    ok=False,
-                    assignments=[],
-                    stats={"durationMs": int((time.time() - start) * 1000), "error": "Locked closed day conflict"},
-                    error="Locked assignment exists on a closed day",
-                )
-
             if d in machine_downtime_by_machine_id.get(a.machine_id, set()):
                 return SolveResponse(
                     ok=False,
@@ -186,15 +172,12 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                 assigned_any[(e_id, d)] = assigned
 
                 is_unavailable = (e_id, d) in unavailable
-                is_closed_day = d in closed_days
 
                 for m_id in machine_ids:
                     var = model.new_bool_var(f"x_e{e_id}_d{d.isoformat()}_m{m_id}")
                     x[(e_id, d, m_id)] = var
 
                     if is_unavailable:
-                        model.add(var == 0)
-                    if is_closed_day:
                         model.add(var == 0)
                     if d in machine_downtime_by_machine_id.get(m_id, set()):
                         model.add(var == 0)
@@ -252,8 +235,6 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
             qualified_in_scope = qualified_for_machine.get(m_id, set())
 
             for d in days:
-                if d in closed_days:
-                    continue
                 if d in downtime_set:
                     continue
 
@@ -343,8 +324,6 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
             downtime_set = machine_downtime_by_machine_id.get(m_id, set())
 
             for d in days:
-                if d in closed_days:
-                    continue
                 if d in downtime_set:
                     continue
 

@@ -331,13 +331,3 @@ model LuxlaitWeeklyEmployeeStatus {
   @@unique([dayDate, employeeId])
   @@map("luxlait_weekly_employee_statuses")
 }
-
-model LuxlaitClosedDay {
-  id        String   @id @default(uuid()) @db.Uuid
-  dayDate   DateTime @db.Date @map("day_date")
-  reason    String?
-  createdAt DateTime @default(now()) @map("created_at")
-
-  @@unique([dayDate])
-  @@map("luxlait_closed_days")
-}

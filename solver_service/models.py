@@ -77,9 +77,6 @@ class SolveRequest(BaseModel):
     # these assignments but is free to deviate when necessary.
     reference_assignments: List[ExistingAssignmentInput] = []
 
-    # Days where planning must stay empty
-    closed_days: List[str] = []
-
     constraints: ConstraintsInput = Field(default_factory=ConstraintsInput)
 
     # Freeform metadata to support future rules and debugging

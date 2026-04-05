@@ -11,7 +11,6 @@ const SOLVER_SETTING_KEYS = {
   solveTimeLimitSeconds: "planning_solver_solve_time_limit_seconds",
   enforceTimeSlotWhenAssigned: "planning_solver_enforce_time_slot_when_assigned",
   stabilityWeight: "planning_solver_stability_weight",
-  closedWeekdays: "planning_closed_weekdays",
 } as const;
 
 function readNumberFromProviderConfig(config: unknown, defaultValue: number): number {
@@ -35,32 +34,6 @@ function readBooleanFromProviderConfig(config: unknown, defaultValue: boolean): 
 function isManager(roles: string[] | undefined): boolean {
   const normalized = (roles ?? []).map((r) => String(r).toLowerCase());
   return normalized.some((r) => r.includes("manager") || r.includes("admin"));
-}
-
-function parseClosedWeekdays(config: unknown): number[] {
-  const raw = Array.isArray(config)
-    ? config
-    : config && typeof config === "object" && "value" in config
-      ? (config as any).value
-      : [];
-  if (!Array.isArray(raw)) return [];
-  return Array.from(
-    new Set(
-      raw
-        .map((n) => Number(n))
-        .filter((n) => Number.isInteger(n) && n >= 0 && n <= 6)
-    )
-  ).sort((a, b) => a - b);
-}
-
-function listDatesInRange(from: Date, to: Date): string[] {
-  const out: string[] = [];
-  const cur = new Date(from);
-  while (cur <= to) {
-    out.push(cur.toISOString().slice(0, 10));
-    cur.setUTCDate(cur.getUTCDate() + 1);
-  }
-  return out;
 }
 
 async function getActiveEmployees() {
@@ -130,7 +103,6 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       timeSlots,
       unavailableDays,
       machineDowntimes,
-      closedDaysByDate,
       settings,
       existingAssignments,
     ] = await Promise.all([
@@ -145,13 +117,6 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       prisma.luxlaitMachineDowntime.findMany({
         where: { dayDate: { gte: from, lte: to } },
       }),
-      prisma.$queryRawUnsafe<Array<{ day_date: Date }>>(
-        `SELECT day_date
-         FROM luxlait_closed_days
-         WHERE day_date >= $1::date AND day_date <= $2::date`,
-        from.toISOString().slice(0, 10),
-        to.toISOString().slice(0, 10)
-      ),
       prisma.systemSettings.findMany({
         where: {
           settingKey: {
@@ -161,7 +126,6 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
               SOLVER_SETTING_KEYS.solveTimeLimitSeconds,
               SOLVER_SETTING_KEYS.enforceTimeSlotWhenAssigned,
               SOLVER_SETTING_KEYS.stabilityWeight,
-              SOLVER_SETTING_KEYS.closedWeekdays,
             ],
           },
         },
@@ -198,22 +162,6 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       settingByKey.get(SOLVER_SETTING_KEYS.stabilityWeight),
       100
     );
-    const closedWeekdays = parseClosedWeekdays(
-      settingByKey.get(SOLVER_SETTING_KEYS.closedWeekdays)
-    );
-
-    const closedDaySet = new Set<string>(
-      (closedDaysByDate as Array<{ day_date: Date }>).map((d) =>
-        new Date(d.day_date).toISOString().slice(0, 10)
-      )
-    );
-    if (closedWeekdays.length > 0) {
-      const weekdaySet = new Set(closedWeekdays);
-      for (const dateText of listDatesInRange(from, to)) {
-        const day = new Date(`${dateText}T00:00:00.000Z`).getUTCDay();
-        if (weekdaySet.has(day)) closedDaySet.add(dateText);
-      }
-    }
 
     const openShiftsByMachineId: Record<string, string[]> = {};
     for (const os of openShifts) {
@@ -277,7 +225,6 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       })),
       existing_assignments: lockedAssignmentRows,
       reference_assignments: referenceAssignmentRows,
-      closed_days: Array.from(closedDaySet).sort(),
       constraints: {
         fairness_weight: body.constraints?.fairness_weight ?? dbFairnessWeight,
         priority_machine_weight:
