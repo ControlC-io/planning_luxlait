@@ -341,7 +341,10 @@ export default function MachinesAdmin() {
             </div>
 
             <div className="space-y-2">
-              <div className="text-sm font-medium">Downtime</div>
+              <div className="text-sm font-medium">Indisponibilités (arrêts machine)</div>
+              <p className="text-xs text-muted-foreground">
+                Jours où cette machine ne peut pas être planifiée (auto-plan et saisie manuelle).
+              </p>
               <div className="flex items-end gap-2">
                 <div className="space-y-1">
                   <div className="text-xs text-muted-foreground">Date</div>

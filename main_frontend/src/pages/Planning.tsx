@@ -21,7 +21,7 @@ type DailyAssignment = { id: string; day_date: string; employee_id: string; mach
 type EmployeeStatus = { id: string; day_date: string; employee_id: string; status_id: string };
 type Skill = { employee_id: string; machine_id: string };
 type TimeSlot = { id: string; name: string; short_name: string | null; color: string; sort_order: number };
-type ClosedDay = { id: string; day_date: string; reason: string | null };
+type MachineDowntimeRow = { machine_id: string; day_date: string };
 
 const DAY_ABBR = ["D", "L", "M", "M", "J", "V", "S"];
 const JWT_STORAGE_KEY = "myrtest_jwt_token";
@@ -39,8 +39,7 @@ export default function Planning() {
   const [empStatuses, setEmpStatuses] = useState<EmployeeStatus[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [timeSlots, setTimeSlots] = useState<TimeSlot[]>([]);
-  const [closedDays, setClosedDays] = useState<ClosedDay[]>([]);
-  const [closedWeekdays, setClosedWeekdays] = useState<number[]>([]);
+  const [machineDowntimes, setMachineDowntimes] = useState<MachineDowntimeRow[]>([]);
 
   const monthStart = format(currentMonth, "yyyy-MM-dd");
   const monthEnd = format(endOfMonth(currentMonth), "yyyy-MM-dd");
@@ -54,6 +53,9 @@ export default function Planning() {
   const [autoPlanApproveLoading, setAutoPlanApproveLoading] = useState(false);
   const [autoPlanProposedAssignments, setAutoPlanProposedAssignments] = useState<DailyAssignment[]>([]);
   const [autoPlanStats, setAutoPlanStats] = useState<Record<string, unknown> | null>(null);
+  const [replanFormOpen, setReplanFormOpen] = useState(false);
+  const [replanFromDate, setReplanFromDate] = useState(() => format(new Date(), "yyyy-MM-dd"));
+  const [replanLoading, setReplanLoading] = useState(false);
   const [viewMode, setViewMode] = useState<"employee" | "machine">("employee");
   const [previewViewMode, setPreviewViewMode] = useState<"employee" | "machine">("employee");
   const [mainViewRangeMode, setMainViewRangeMode] = useState<"month" | "week">("month");
@@ -88,47 +90,17 @@ export default function Planning() {
     setSkills((sk.data as any) ?? []);
     setTimeSlots((ts.data as any) ?? []);
 
-    try {
-      const token = localStorage.getItem(JWT_STORAGE_KEY);
-      if (!token) return;
-      const res = await fetch("/api/planning/luxlait_closed_weekdays", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const json = await res.json().catch(() => ({}));
-      if (res.ok && Array.isArray(json?.weekdays)) {
-        setClosedWeekdays(json.weekdays);
-      }
-    } catch {
-      // keep planning usable if closed day config cannot be loaded
-    }
   };
 
   const fetchMonthData = async () => {
-    const [a, es] = await Promise.all([
+    const [a, es, dt] = await Promise.all([
       supabase.from("luxlait_daily_assignments" as any).select("*").gte("day_date", monthStart).lte("day_date", monthEnd),
       supabase.from("luxlait_weekly_employee_statuses" as any).select("*").gte("day_date", monthStart).lte("day_date", monthEnd),
+      supabase.from("luxlait_machine_downtimes" as any).select("machine_id, day_date").gte("day_date", monthStart).lte("day_date", monthEnd),
     ]);
     setDailyAssignments((a.data as any) ?? []);
     setEmpStatuses((es.data as any) ?? []);
-
-    try {
-      const token = localStorage.getItem(JWT_STORAGE_KEY);
-      if (!token) return;
-      const url = new URL("/api/planning/luxlait_closed_days", window.location.origin);
-      url.searchParams.set("fromDate", monthStart);
-      url.searchParams.set("toDate", monthEnd);
-      const res = await fetch(url.toString(), {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const json = await res.json().catch(() => []);
-      if (res.ok && Array.isArray(json)) {
-        setClosedDays(json as ClosedDay[]);
-      } else {
-        setClosedDays([]);
-      }
-    } catch {
-      setClosedDays([]);
-    }
+    setMachineDowntimes((dt.data as MachineDowntimeRow[]) ?? []);
   };
 
   useEffect(() => { fetchAll(); }, []);
@@ -136,6 +108,11 @@ export default function Planning() {
   useEffect(() => {
     setAutoPlanFromDate(monthStart);
     setAutoPlanToDate(monthEnd);
+    const today = new Date();
+    const isCurrentDisplayedMonth =
+      today.getFullYear() === currentMonth.getFullYear() &&
+      today.getMonth() === currentMonth.getMonth();
+    setReplanFromDate(isCurrentDisplayedMonth ? format(today, "yyyy-MM-dd") : monthStart);
   }, [monthStart, monthEnd]);
   useEffect(() => {
     const today = new Date();
@@ -202,14 +179,11 @@ export default function Planning() {
     return m;
   }, [timeSlots]);
 
-  const closedDaySet = useMemo(() => new Set(closedDays.map((d) => d.day_date)), [closedDays]);
-
-  const isClosedDay = (day: string): boolean => {
-    if (closedDaySet.has(day)) return true;
-    if (!closedWeekdays.length) return false;
-    const weekDay = new Date(`${day}T00:00:00`).getDay();
-    return closedWeekdays.includes(weekDay);
-  };
+  const machineDowntimeKeySet = useMemo(() => {
+    const s = new Set<string>();
+    machineDowntimes.forEach((d) => s.add(`${d.machine_id}_${d.day_date}`));
+    return s;
+  }, [machineDowntimes]);
 
   const skillSet = useMemo(() => {
     const s = new Set<string>();
@@ -453,6 +427,72 @@ export default function Planning() {
     }
   };
 
+  const requestReplan = async () => {
+    if (!canUseAutoPlan) return;
+
+    const token = localStorage.getItem(JWT_STORAGE_KEY);
+    if (!token) {
+      toast({ title: "Authentication required", description: "Please sign in again.", variant: "destructive" });
+      return;
+    }
+
+    const replanDate = parseISO(replanFromDate);
+    if (Number.isNaN(replanDate.getTime())) {
+      toast({ title: "Date invalide", description: "Choisissez une date valide.", variant: "destructive" });
+      return;
+    }
+
+    const monthStartDate = parseISO(monthStart);
+    const monthEndDate = parseISO(monthEnd);
+    if (replanDate < monthStartDate || replanDate > monthEndDate) {
+      toast({ title: "Date hors limites", description: "La date doit être dans le mois courant.", variant: "destructive" });
+      return;
+    }
+
+    setReplanLoading(true);
+    try {
+      const response = await fetch("/api/planning/auto_plan", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          replanFromDate: replanFromDate,
+        }),
+      });
+
+      const json = await response.json();
+      if (!response.ok || !json?.ok) {
+        toast({
+          title: "Re-Plan failed",
+          description: json?.error ? String(json.error) : "Solver returned an error",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const proposed = (json.assignments ?? []).map((a: any) => ({
+        id: `preview_${a.employee_id}_${a.day_date}`,
+        day_date: a.day_date,
+        employee_id: a.employee_id,
+        machine_id: a.machine_id,
+        time_slot_id: a.time_slot_id ?? null,
+      })) as DailyAssignment[];
+
+      setAutoPlanFromDate(replanFromDate);
+      setAutoPlanToDate(monthEnd);
+      setAutoPlanProposedAssignments(proposed);
+      setAutoPlanStats(json.stats ?? null);
+      setAutoPlanPreviewOpen(true);
+      setReplanFormOpen(false);
+    } catch (e) {
+      toast({ title: "Network error", description: e instanceof Error ? e.message : "Request failed", variant: "destructive" });
+    } finally {
+      setReplanLoading(false);
+    }
+  };
+
   const approveAutoPlan = async () => {
     const token = localStorage.getItem(JWT_STORAGE_KEY);
     if (!token) return;
@@ -470,7 +510,7 @@ export default function Planning() {
             day_date: a.day_date,
             employee_id: a.employee_id,
             machine_id: a.machine_id,
-            time_slot_id: a.time_slot_id,
+            time_slot_id: a.time_slot_id || null,
           })),
         }),
       });
@@ -479,7 +519,11 @@ export default function Planning() {
       if (!response.ok || !json?.ok) {
         toast({
           title: "Save failed",
-          description: json?.error ? String(json.error) : "Bulk upsert returned an error",
+          description: json?.detail
+            ? `${String(json.error ?? "Bulk upsert returned an error")} (${String(json.detail)})`
+            : json?.error
+              ? String(json.error)
+              : "Bulk upsert returned an error",
           variant: "destructive",
         });
         return;
@@ -546,6 +590,11 @@ export default function Planning() {
         {canUseAutoPlan && (
           <Button variant="outline" size="sm" onClick={() => setAutoPlanFormOpen(true)} disabled={autoPlanLoading}>
             Auto Plan
+          </Button>
+        )}
+        {canUseAutoPlan && dailyAssignments.length > 0 && (
+          <Button variant="outline" size="sm" onClick={() => setReplanFormOpen(true)} disabled={replanLoading}>
+            Re-Plan
           </Button>
         )}
         <ToggleGroup
@@ -627,15 +676,13 @@ export default function Planning() {
                 const dayNum = d.getDate();
                 const dayOfWeek = d.getDay();
                 const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-                const closed = isClosedDay(day);
                 return (
                   <th
                     key={day}
-                    className={`p-1 text-center font-medium min-w-[60px] ${isWeekend ? "bg-muted" : ""} ${closed ? "bg-red-50" : ""}`}
+                    className={`p-1 text-center font-medium min-w-[60px] ${isWeekend ? "bg-muted" : ""}`}
                   >
                     <div className="text-muted-foreground text-[9px]">{DAY_ABBR[dayOfWeek]}</div>
                     <div className="text-xs">{dayNum}</div>
-                    {closed ? <div className="text-[9px] text-red-600">Fermé</div> : null}
                   </th>
                 );
               })}
@@ -666,7 +713,10 @@ export default function Planning() {
                       statuses={statuses}
                       machineMap={machineMap}
                       timeSlotMap={timeSlotMap}
-                      qualifiedMachines={getQualifiedMachines(emp.id)}
+                      qualifiedMachines={getQualifiedMachines(emp.id).filter(
+                        (m) => !machineDowntimeKeySet.has(`${m.id}_${day}`)
+                      )}
+                      machineDowntimeKeySet={machineDowntimeKeySet}
                       timeSlots={timeSlots}
                       onAssign={handleAssign}
                       onSetStatus={handleSetDayStatus}
@@ -685,6 +735,7 @@ export default function Planning() {
           getAssignments={(key) => filteredAssignmentsByMachineDay.get(key) ?? []}
           employeeMap={employeeMap}
           timeSlotMap={timeSlotMap}
+          machineDowntimeKeySet={machineDowntimeKeySet}
           spacious={false}
         />
       )}
@@ -729,6 +780,41 @@ export default function Planning() {
           </Button>
           <Button onClick={requestAutoPlan} disabled={autoPlanLoading}>
             {autoPlanLoading ? "Solving..." : "Run Auto Plan"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    {/* Re-Plan form dialog */}
+    <Dialog open={replanFormOpen} onOpenChange={setReplanFormOpen}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Re-Plan</DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div className="text-sm text-muted-foreground">
+            Re-calculer le planning à partir d'une date. Les assignations avant cette date sont verrouillées. Le solveur minimise les changements par rapport au planning actuel.
+          </div>
+          <div className="space-y-1">
+            <div className="text-xs font-medium text-muted-foreground">Re-planifier à partir du</div>
+            <Input
+              type="date"
+              value={replanFromDate}
+              min={monthStart}
+              max={monthEnd}
+              onChange={(e) => setReplanFromDate(e.target.value)}
+              disabled={replanLoading}
+            />
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setReplanFormOpen(false)} disabled={replanLoading}>
+            Cancel
+          </Button>
+          <Button onClick={requestReplan} disabled={replanLoading}>
+            {replanLoading ? "Solving..." : "Run Re-Plan"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -861,7 +947,10 @@ export default function Planning() {
                           statuses={statuses}
                           machineMap={machineMap}
                           timeSlotMap={timeSlotMap}
-                          qualifiedMachines={getQualifiedMachines(emp.id)}
+                          qualifiedMachines={getQualifiedMachines(emp.id).filter(
+                            (m) => !machineDowntimeKeySet.has(`${m.id}_${day}`)
+                          )}
+                          machineDowntimeKeySet={machineDowntimeKeySet}
                           timeSlots={timeSlots}
                           onAssign={(_empId, _day, _machineId, _timeSlotId) => undefined}
                           onSetStatus={(_empId, _day, _statusId) => undefined}
@@ -883,6 +972,7 @@ export default function Planning() {
               getExistingAssignments={(key) => filteredAssignmentsByMachineDay.get(key) ?? []}
               employeeMap={employeeMap}
               timeSlotMap={timeSlotMap}
+              machineDowntimeKeySet={machineDowntimeKeySet}
               showChanges
               spacious
             />
@@ -919,6 +1009,7 @@ function PlanningCell({
   machineMap,
   timeSlotMap,
   qualifiedMachines,
+  machineDowntimeKeySet,
   timeSlots,
   onAssign,
   onSetStatus,
@@ -936,6 +1027,7 @@ function PlanningCell({
   machineMap: Map<string, Machine>;
   timeSlotMap: Map<string, TimeSlot>;
   qualifiedMachines: Machine[];
+  machineDowntimeKeySet: Set<string>;
   timeSlots: TimeSlot[];
   onAssign: (empId: string, day: string, machineId: string | null, timeSlotId: string | null) => void;
   onSetStatus: (empId: string, day: string, statusId: string | null) => void;
@@ -948,6 +1040,9 @@ function PlanningCell({
   const assignedMachineIsQualified = assignment
     ? qualifiedMachines.some((m) => m.id === assignment.machine_id)
     : true;
+  const machineOnDowntime = assignment
+    ? machineDowntimeKeySet.has(`${assignment.machine_id}_${dayDate}`)
+    : false;
 
   const cellBg = status
     ? status.color
@@ -1035,13 +1130,14 @@ function PlanningCell({
                   {qualifiedMachines.map((m) => (
                     <SelectItem key={m.id} value={m.id} className="text-xs">{m.name}</SelectItem>
                   ))}
-                  {assignment && machine && !assignedMachineIsQualified && (
+                  {assignment && machine && (!assignedMachineIsQualified || machineOnDowntime) && (
                     <SelectItem
                       value={machine.id}
                       className="text-xs opacity-60"
                       disabled
                     >
                       {machine.name} (current)
+                      {machineOnDowntime ? " — arrêt" : ""}
                     </SelectItem>
                   )}
                   {qualifiedMachines.length === 0 && (
@@ -1120,6 +1216,7 @@ function MachineGrid({
   getExistingAssignments,
   employeeMap,
   timeSlotMap,
+  machineDowntimeKeySet,
   showChanges,
   spacious,
 }: {
@@ -1129,6 +1226,7 @@ function MachineGrid({
   getExistingAssignments?: (key: string) => DailyAssignment[];
   employeeMap: Map<string, Employee>;
   timeSlotMap: Map<string, TimeSlot>;
+  machineDowntimeKeySet: Set<string>;
   showChanges?: boolean;
   spacious?: boolean;
 }) {
@@ -1200,6 +1298,7 @@ function MachineGrid({
                         employeeMap={employeeMap}
                         timeSlotMap={timeSlotMap}
                         isWeekend={isWeekend}
+                        isDowntime={machineDowntimeKeySet.has(`${machine.id}_${day}`)}
                         isProposedChange={isProposedChange}
                         spacious={spacious}
                       />
@@ -1220,6 +1319,7 @@ function MachineDayCell({
   employeeMap,
   timeSlotMap,
   isWeekend,
+  isDowntime,
   isProposedChange,
   spacious,
 }: {
@@ -1227,16 +1327,24 @@ function MachineDayCell({
   employeeMap: Map<string, Employee>;
   timeSlotMap: Map<string, TimeSlot>;
   isWeekend: boolean;
+  isDowntime: boolean;
   isProposedChange?: boolean;
   spacious?: boolean;
 }) {
+  const bgStyle: React.CSSProperties = {};
+  if (isWeekend) bgStyle.backgroundColor = "hsl(var(--muted))";
+  if (isDowntime) bgStyle.backgroundColor = "hsl(var(--muted) / 0.85)";
+
   return (
     <td
-      className={`p-0 text-center border-r border-border/30 ${isProposedChange ? "ring-1 ring-primary/70 ring-inset" : ""}`}
-      style={isWeekend ? { backgroundColor: "hsl(var(--muted))" } : {}}
+      className={`p-0 text-center border-r border-border/30 ${isProposedChange ? "ring-1 ring-primary/70 ring-inset" : ""} ${isDowntime ? "text-muted-foreground" : ""}`}
+      style={Object.keys(bgStyle).length ? bgStyle : undefined}
+      title={isDowntime ? "Machine à l’arrêt ce jour" : undefined}
     >
       <div className={`flex flex-col items-center justify-center gap-1 ${spacious ? "min-h-[44px] py-1" : "min-h-[32px] py-0.5"}`}>
-        {assignments.length === 0 ? (
+        {isDowntime && assignments.length === 0 ? (
+          <span className={`text-amber-700/90 ${spacious ? "text-[10px]" : "text-[8px]"} font-medium`}>Arrêt</span>
+        ) : assignments.length === 0 ? (
           <span className={`text-muted-foreground ${spacious ? "text-xs" : "text-[9px]"}`}>&middot;</span>
         ) : (
           assignments.map((a) => {

@@ -10,7 +10,7 @@ const SOLVER_SETTING_KEYS = {
   priorityMachineWeight: "planning_solver_priority_machine_weight",
   solveTimeLimitSeconds: "planning_solver_solve_time_limit_seconds",
   enforceTimeSlotWhenAssigned: "planning_solver_enforce_time_slot_when_assigned",
-  closedWeekdays: "planning_closed_weekdays",
+  stabilityWeight: "planning_solver_stability_weight",
 } as const;
 
 function readNumberFromProviderConfig(config: unknown, defaultValue: number): number {
@@ -34,32 +34,6 @@ function readBooleanFromProviderConfig(config: unknown, defaultValue: boolean): 
 function isManager(roles: string[] | undefined): boolean {
   const normalized = (roles ?? []).map((r) => String(r).toLowerCase());
   return normalized.some((r) => r.includes("manager") || r.includes("admin"));
-}
-
-function parseClosedWeekdays(config: unknown): number[] {
-  const raw = Array.isArray(config)
-    ? config
-    : config && typeof config === "object" && "value" in config
-      ? (config as any).value
-      : [];
-  if (!Array.isArray(raw)) return [];
-  return Array.from(
-    new Set(
-      raw
-        .map((n) => Number(n))
-        .filter((n) => Number.isInteger(n) && n >= 0 && n <= 6)
-    )
-  ).sort((a, b) => a - b);
-}
-
-function listDatesInRange(from: Date, to: Date): string[] {
-  const out: string[] = [];
-  const cur = new Date(from);
-  while (cur <= to) {
-    out.push(cur.toISOString().slice(0, 10));
-    cur.setUTCDate(cur.getUTCDate() + 1);
-  }
-  return out;
 }
 
 async function getActiveEmployees() {
@@ -86,21 +60,40 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
         enforce_time_slot_when_assigned?: boolean;
       };
       lockExisting?: boolean;
+      replanFromDate?: string;
     };
 
-    if (!body?.fromDate || !body?.toDate) {
+    const isReplan = !!body?.replanFromDate;
+
+    if (!isReplan && (!body?.fromDate || !body?.toDate)) {
       res.status(400).json({ error: "fromDate and toDate are required" });
       return;
     }
 
-    const from = parseYYYYMMDD(body.fromDate);
-    const to = parseYYYYMMDD(body.toDate);
-    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
-      res.status(400).json({ error: "Invalid fromDate or toDate format" });
-      return;
+    let from: Date;
+    let to: Date;
+    let replanBoundary: Date | null = null;
+
+    if (isReplan) {
+      replanBoundary = parseYYYYMMDD(body.replanFromDate!);
+      if (Number.isNaN(replanBoundary.getTime())) {
+        res.status(400).json({ error: "Invalid replanFromDate format" });
+        return;
+      }
+      const monthStart = new Date(Date.UTC(replanBoundary.getUTCFullYear(), replanBoundary.getUTCMonth(), 1));
+      const monthEnd = new Date(Date.UTC(replanBoundary.getUTCFullYear(), replanBoundary.getUTCMonth() + 1, 0));
+      from = monthStart;
+      to = monthEnd;
+    } else {
+      from = parseYYYYMMDD(body.fromDate);
+      to = parseYYYYMMDD(body.toDate);
+      if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+        res.status(400).json({ error: "Invalid fromDate or toDate format" });
+        return;
+      }
     }
 
-    const lockExisting = body.lockExisting ?? true;
+    const lockExisting = isReplan ? true : (body.lockExisting ?? true);
 
     const [
       employees,
@@ -110,7 +103,6 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       timeSlots,
       unavailableDays,
       machineDowntimes,
-      closedDaysByDate,
       settings,
       existingAssignments,
     ] = await Promise.all([
@@ -125,13 +117,6 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       prisma.luxlaitMachineDowntime.findMany({
         where: { dayDate: { gte: from, lte: to } },
       }),
-      prisma.$queryRawUnsafe<Array<{ day_date: Date }>>(
-        `SELECT day_date
-         FROM luxlait_closed_days
-         WHERE day_date >= $1::date AND day_date <= $2::date`,
-        body.fromDate,
-        body.toDate
-      ),
       prisma.systemSettings.findMany({
         where: {
           settingKey: {
@@ -140,12 +125,12 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
               SOLVER_SETTING_KEYS.priorityMachineWeight,
               SOLVER_SETTING_KEYS.solveTimeLimitSeconds,
               SOLVER_SETTING_KEYS.enforceTimeSlotWhenAssigned,
-              SOLVER_SETTING_KEYS.closedWeekdays,
+              SOLVER_SETTING_KEYS.stabilityWeight,
             ],
           },
         },
       }),
-      lockExisting
+      (lockExisting || isReplan)
         ? prisma.luxlaitDailyAssignment.findMany({
             where: { dayDate: { gte: from, lte: to } },
           })
@@ -173,22 +158,10 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       settingByKey.get(SOLVER_SETTING_KEYS.priorityMachineWeight),
       50
     );
-    const closedWeekdays = parseClosedWeekdays(
-      settingByKey.get(SOLVER_SETTING_KEYS.closedWeekdays)
+    const dbStabilityWeight = readNumberFromProviderConfig(
+      settingByKey.get(SOLVER_SETTING_KEYS.stabilityWeight),
+      100
     );
-
-    const closedDaySet = new Set<string>(
-      (closedDaysByDate as Array<{ day_date: Date }>).map((d) =>
-        new Date(d.day_date).toISOString().slice(0, 10)
-      )
-    );
-    if (closedWeekdays.length > 0) {
-      const weekdaySet = new Set(closedWeekdays);
-      for (const dateText of listDatesInRange(from, to)) {
-        const day = new Date(`${dateText}T00:00:00.000Z`).getUTCDay();
-        if (weekdaySet.has(day)) closedDaySet.add(dateText);
-      }
-    }
 
     const openShiftsByMachineId: Record<string, string[]> = {};
     for (const os of openShifts) {
@@ -202,9 +175,28 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       downtimesByMachineId[dt.machineId]!.push(dt.dayDate.toISOString().slice(0, 10));
     }
 
+    const allAssignmentRows = (existingAssignments as any[]).map((a) => ({
+      day_date: a.dayDate.toISOString().slice(0, 10),
+      employee_id: a.employeeId,
+      machine_id: a.machineId,
+      time_slot_id: a.timeSlotId,
+    }));
+
+    let lockedAssignmentRows = allAssignmentRows;
+    let referenceAssignmentRows: typeof allAssignmentRows = [];
+
+    if (isReplan && replanBoundary) {
+      const boundaryStr = replanBoundary.toISOString().slice(0, 10);
+      lockedAssignmentRows = allAssignmentRows.filter((a) => a.day_date < boundaryStr);
+      referenceAssignmentRows = allAssignmentRows.filter((a) => a.day_date >= boundaryStr);
+    }
+
+    const solverFromDate = isReplan ? from.toISOString().slice(0, 10) : body.fromDate;
+    const solverToDate = isReplan ? to.toISOString().slice(0, 10) : body.toDate;
+
     const solverRequest = {
-      from_date: body.fromDate,
-      to_date: body.toDate,
+      from_date: solverFromDate,
+      to_date: solverToDate,
       employees: employees.map((e) => ({
         id: e.id,
         is_backup: e.isBackup,
@@ -231,13 +223,8 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
         day_date: es.dayDate.toISOString().slice(0, 10),
         status_id: es.statusId,
       })),
-      existing_assignments: (existingAssignments as any[]).map((a) => ({
-        day_date: a.dayDate.toISOString().slice(0, 10),
-        employee_id: a.employeeId,
-        machine_id: a.machineId,
-        time_slot_id: a.timeSlotId,
-      })),
-      closed_days: Array.from(closedDaySet).sort(),
+      existing_assignments: lockedAssignmentRows,
+      reference_assignments: referenceAssignmentRows,
       constraints: {
         fairness_weight: body.constraints?.fairness_weight ?? dbFairnessWeight,
         priority_machine_weight:
@@ -246,6 +233,7 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
           body.constraints?.solve_time_limit_seconds ?? dbSolveTimeLimitSeconds,
         enforce_time_slot_when_assigned:
           body.constraints?.enforce_time_slot_when_assigned ?? dbEnforceTimeSlotWhenAssigned,
+        stability_weight: isReplan ? dbStabilityWeight : 0,
       },
     };
 
@@ -289,6 +277,13 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       // Important: return HTTP 200 so the browser does not treat this as a network failure.
       res.status(200).json(json);
       return;
+    }
+
+    if (isReplan && replanBoundary) {
+      const boundaryStr = replanBoundary.toISOString().slice(0, 10);
+      json.assignments = (json.assignments ?? []).filter(
+        (a: any) => a.day_date >= boundaryStr
+      );
     }
 
     res.status(200).json(json);
