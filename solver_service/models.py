@@ -8,8 +8,6 @@ from pydantic import BaseModel, Field
 
 class EmployeeInput(BaseModel):
     id: str
-    default_team_id: Optional[str] = None
-    is_team_leader: bool = False
     is_backup: bool = False
 
 
@@ -44,13 +42,11 @@ class ExistingAssignmentInput(BaseModel):
     employee_id: str
     machine_id: str
     time_slot_id: Optional[str] = None
-    team_id: Optional[str] = None
 
 
 class ConstraintsInput(BaseModel):
     # Objective weights
     fairness_weight: int = Field(default=1, ge=0)
-    leader_weight: int = Field(default=100, ge=0)
     priority_machine_weight: int = Field(default=50, ge=0)
 
     # Solver behavior
@@ -76,6 +72,9 @@ class SolveRequest(BaseModel):
     # Optional lock-in for already confirmed days
     existing_assignments: List[ExistingAssignmentInput] = []
 
+    # Days where planning must stay empty
+    closed_days: List[str] = []
+
     constraints: ConstraintsInput = Field(default_factory=ConstraintsInput)
 
     # Freeform metadata to support future rules and debugging
@@ -87,7 +86,6 @@ class PlannedAssignment(BaseModel):
     employee_id: str
     machine_id: str
     time_slot_id: str
-    team_id: Optional[str] = None
 
 
 class SolveResponse(BaseModel):

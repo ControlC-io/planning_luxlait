@@ -1,9 +1,14 @@
 // Prisma Schema for Better Auth and System Settings
 
+//generator client {
+//  provider      = "prisma-client-js"
+  // Windows (local), linux-musl (Alpine x64), linux-musl-arm64 (Alpine ARM e.g. Docker Desktop ARM)
+ // binaryTargets = ["windows", "linux-musl", "linux-musl-arm64-openssl-3.0.x", "darwin-arm64"]
+//}
+
 generator client {
   provider      = "prisma-client-js"
-  // Windows (local), linux-musl (Alpine x64), linux-musl-arm64 (Alpine ARM e.g. Docker Desktop ARM)
-  binaryTargets = ["windows", "linux-musl", "linux-musl-arm64-openssl-3.0.x", "darwin-arm64"]
+  binaryTargets = ["native", "windows", "linux-musl", "linux-musl-openssl-3.0.x", "linux-musl-arm64-openssl-3.0.x", "darwin-arm64"]
 }
 
 datasource db {
@@ -171,32 +176,13 @@ enum MachineImportance {
   OPTIONAL
 }
 
-model LuxlaitTeam {
-  id        String   @id @default(uuid()) @db.Uuid
-  name      String
-  color     String   @default("#3B82F6")
-  sortOrder Int      @default(0) @map("sort_order")
-  createdAt DateTime @default(now()) @map("created_at")
-
-  employees            LuxlaitEmployee[]
-  dailyAssignments     LuxlaitDailyAssignment[]
-  teamDailySlots       LuxlaitTeamDailySlot[]
-  weeklyAssignments    LuxlaitWeeklyAssignment[]
-
-  @@map("luxlait_teams")
-}
-
 model LuxlaitEmployee {
   id              String   @id @default(uuid()) @db.Uuid
   firstName      String   @map("first_name")
   lastName       String   @map("last_name")
-  defaultTeamId  String?  @map("default_team_id") @db.Uuid
-  isTeamLeader   Boolean  @default(false) @map("is_team_leader")
   isBackup        Boolean  @default(false) @map("is_backup")
   active          Boolean  @default(true)
   createdAt      DateTime @default(now()) @map("created_at")
-
-  defaultTeam LuxlaitTeam? @relation(fields: [defaultTeamId], references: [id])
 
   skills                 LuxlaitEmployeeMachineSkill[]
   dailyAssignments       LuxlaitDailyAssignment[]
@@ -235,7 +221,6 @@ model LuxlaitTimeSlot {
   createdAt DateTime @default(now()) @map("created_at")
 
   dailyAssignments LuxlaitDailyAssignment[]
-  teamDailySlots   LuxlaitTeamDailySlot[]
   machineOpenShifts LuxlaitMachineOpenShift[]
 
   @@map("luxlait_time_slots")
@@ -309,41 +294,24 @@ model LuxlaitDailyAssignment {
   employeeId String    @map("employee_id") @db.Uuid
   machineId  String    @map("machine_id") @db.Uuid
   timeSlotId String?   @map("time_slot_id") @db.Uuid
-  teamId     String    @map("team_id") @db.Uuid
   createdAt  DateTime  @default(now()) @map("created_at")
 
   employee  LuxlaitEmployee @relation(fields: [employeeId], references: [id])
   machine   LuxlaitMachine  @relation(fields: [machineId], references: [id])
   timeSlot  LuxlaitTimeSlot? @relation(fields: [timeSlotId], references: [id])
-  team      LuxlaitTeam     @relation(fields: [teamId], references: [id])
 
   @@unique([dayDate, employeeId])
   @@map("luxlait_daily_assignments")
 }
 
-model LuxlaitTeamDailySlot {
-  id         String   @id @default(uuid()) @db.Uuid
-  teamId     String   @map("team_id") @db.Uuid
-  dayDate    DateTime @db.Date @map("day_date")
-  timeSlotId String   @map("time_slot_id") @db.Uuid
-  createdAt  DateTime @default(now()) @map("created_at")
-
-  team      LuxlaitTeam     @relation(fields: [teamId], references: [id])
-  timeSlot  LuxlaitTimeSlot @relation(fields: [timeSlotId], references: [id])
-
-  @@map("luxlait_team_daily_slots")
-}
-
 model LuxlaitWeeklyAssignment {
   id         String   @id @default(uuid()) @db.Uuid
   weekStart  DateTime @db.Date @map("week_start")
-  teamId     String   @map("team_id") @db.Uuid
   machineId  String   @map("machine_id") @db.Uuid
   employeeId String   @map("employee_id") @db.Uuid
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")
 
-  team     LuxlaitTeam     @relation(fields: [teamId], references: [id])
   machine  LuxlaitMachine  @relation(fields: [machineId], references: [id])
   employee LuxlaitEmployee @relation(fields: [employeeId], references: [id])
 
@@ -362,4 +330,14 @@ model LuxlaitWeeklyEmployeeStatus {
 
   @@unique([dayDate, employeeId])
   @@map("luxlait_weekly_employee_statuses")
+}
+
+model LuxlaitClosedDay {
+  id        String   @id @default(uuid()) @db.Uuid
+  dayDate   DateTime @db.Date @map("day_date")
+  reason    String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([dayDate])
+  @@map("luxlait_closed_days")
 }

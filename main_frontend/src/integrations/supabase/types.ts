@@ -51,42 +51,28 @@ export type Database = {
         Row: {
           active: boolean
           created_at: string
-          default_team_id: string | null
           first_name: string
           id: string
           is_backup: boolean
-          is_team_leader: boolean
           last_name: string
         }
         Insert: {
           active?: boolean
           created_at?: string
-          default_team_id?: string | null
           first_name: string
           id?: string
           is_backup?: boolean
-          is_team_leader?: boolean
           last_name: string
         }
         Update: {
           active?: boolean
           created_at?: string
-          default_team_id?: string | null
           first_name?: string
           id?: string
           is_backup?: boolean
-          is_team_leader?: boolean
           last_name?: string
         }
-        Relationships: [
-          {
-            foreignKeyName: "accumalux_employees_default_team_id_fkey"
-            columns: ["default_team_id"]
-            isOneToOne: false
-            referencedRelation: "accumalux_teams"
-            referencedColumns: ["id"]
-          },
-        ]
+        Relationships: []
       }
       accumalux_machines: {
         Row: {
@@ -163,69 +149,6 @@ export type Database = {
         }
         Relationships: []
       }
-      accumalux_team_daily_slots: {
-        Row: {
-          created_at: string
-          day_date: string
-          id: string
-          team_id: string
-          time_slot_id: string
-        }
-        Insert: {
-          created_at?: string
-          day_date: string
-          id?: string
-          team_id: string
-          time_slot_id: string
-        }
-        Update: {
-          created_at?: string
-          day_date?: string
-          id?: string
-          team_id?: string
-          time_slot_id?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "accumalux_team_daily_slots_team_id_fkey"
-            columns: ["team_id"]
-            isOneToOne: false
-            referencedRelation: "accumalux_teams"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "accumalux_team_daily_slots_time_slot_id_fkey"
-            columns: ["time_slot_id"]
-            isOneToOne: false
-            referencedRelation: "accumalux_time_slots"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-      accumalux_teams: {
-        Row: {
-          color: string | null
-          created_at: string
-          id: string
-          name: string
-          sort_order: number
-        }
-        Insert: {
-          color?: string | null
-          created_at?: string
-          id?: string
-          name: string
-          sort_order?: number
-        }
-        Update: {
-          color?: string | null
-          created_at?: string
-          id?: string
-          name?: string
-          sort_order?: number
-        }
-        Relationships: []
-      }
       accumalux_time_slots: {
         Row: {
           color: string
@@ -256,7 +179,6 @@ export type Database = {
           employee_id: string
           id: string
           machine_id: string
-          team_id: string
           updated_at: string
           week_start: string
         }
@@ -265,7 +187,6 @@ export type Database = {
           employee_id: string
           id?: string
           machine_id: string
-          team_id: string
           updated_at?: string
           week_start: string
         }
@@ -274,7 +195,6 @@ export type Database = {
           employee_id?: string
           id?: string
           machine_id?: string
-          team_id?: string
           updated_at?: string
           week_start?: string
         }
@@ -291,13 +211,6 @@ export type Database = {
             columns: ["machine_id"]
             isOneToOne: false
             referencedRelation: "accumalux_machines"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "accumalux_weekly_assignments_team_id_fkey"
-            columns: ["team_id"]
-            isOneToOne: false
-            referencedRelation: "accumalux_teams"
             referencedColumns: ["id"]
           },
         ]

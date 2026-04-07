@@ -10,18 +10,18 @@ import { Badge } from "@/components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ChevronLeft, ChevronRight, Copy, Users, Factory } from "lucide-react";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { format, startOfMonth, endOfMonth, getDaysInMonth, addMonths, subMonths, eachDayOfInterval, parseISO } from "date-fns";
+import { format, startOfMonth, endOfMonth, getDaysInMonth, addMonths, subMonths, eachDayOfInterval, parseISO, startOfWeek, addWeeks, subWeeks, addDays } from "date-fns";
 import { fr } from "date-fns/locale";
 import { useToast } from "@/hooks/use-toast";
 
-type Team = { id: string; name: string; color: string; sort_order: number };
 type Machine = { id: string; name: string; short_name: string | null; sort_order: number; machine_group: string | null; max_employees: number };
-type Employee = { id: string; first_name: string; last_name: string; default_team_id: string | null; is_team_leader: boolean; is_backup: boolean };
+type Employee = { id: string; first_name: string; last_name: string; is_backup: boolean };
 type Status = { id: string; name: string; color: string };
-type DailyAssignment = { id: string; day_date: string; employee_id: string; machine_id: string; time_slot_id: string | null; team_id: string };
+type DailyAssignment = { id: string; day_date: string; employee_id: string; machine_id: string; time_slot_id: string | null };
 type EmployeeStatus = { id: string; day_date: string; employee_id: string; status_id: string };
 type Skill = { employee_id: string; machine_id: string };
 type TimeSlot = { id: string; name: string; short_name: string | null; color: string; sort_order: number };
+type ClosedDay = { id: string; day_date: string; reason: string | null };
 
 const DAY_ABBR = ["D", "L", "M", "M", "J", "V", "S"];
 const JWT_STORAGE_KEY = "myrtest_jwt_token";
@@ -30,8 +30,8 @@ export default function Planning() {
   const { isAdmin, isManager } = useAuth();
   const { toast } = useToast();
   const canEditPlanning = isAdmin || isManager;
+  const canUseAutoPlan = isAdmin || isManager;
   const [currentMonth, setCurrentMonth] = useState(() => startOfMonth(new Date()));
-  const [teams, setTeams] = useState<Team[]>([]);
   const [machines, setMachines] = useState<Machine[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [statuses, setStatuses] = useState<Status[]>([]);
@@ -39,6 +39,8 @@ export default function Planning() {
   const [empStatuses, setEmpStatuses] = useState<EmployeeStatus[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [timeSlots, setTimeSlots] = useState<TimeSlot[]>([]);
+  const [closedDays, setClosedDays] = useState<ClosedDay[]>([]);
+  const [closedWeekdays, setClosedWeekdays] = useState<number[]>([]);
 
   const monthStart = format(currentMonth, "yyyy-MM-dd");
   const monthEnd = format(endOfMonth(currentMonth), "yyyy-MM-dd");
@@ -54,6 +56,12 @@ export default function Planning() {
   const [autoPlanStats, setAutoPlanStats] = useState<Record<string, unknown> | null>(null);
   const [viewMode, setViewMode] = useState<"employee" | "machine">("employee");
   const [previewViewMode, setPreviewViewMode] = useState<"employee" | "machine">("employee");
+  const [mainViewRangeMode, setMainViewRangeMode] = useState<"month" | "week">("month");
+  const [previewRangeMode, setPreviewRangeMode] = useState<"fullRange" | "week">("fullRange");
+  const [mainWeekStart, setMainWeekStart] = useState<string | null>(null);
+  const [previewWeekStart, setPreviewWeekStart] = useState<string | null>(null);
+  const [selectedEmployeeIds, setSelectedEmployeeIds] = useState<string[]>([]);
+  const [employeeFilterTouched, setEmployeeFilterTouched] = useState(false);
   const monthDays = useMemo(() =>
     eachDayOfInterval({ start: currentMonth, end: endOfMonth(currentMonth) }).map(d => format(d, "yyyy-MM-dd")),
     [currentMonth]
@@ -67,20 +75,32 @@ export default function Planning() {
   }, [autoPlanFromDate, autoPlanToDate]);
 
   const fetchAll = async () => {
-    const [t, m, e, s, sk, ts] = await Promise.all([
-      supabase.from("luxlait_teams" as any).select("*").order("sort_order"),
+    const [m, e, s, sk, ts] = await Promise.all([
       supabase.from("luxlait_machines" as any).select("*").order("sort_order"),
       supabase.from("luxlait_employees" as any).select("*").eq("active", true),
       supabase.from("luxlait_statuses" as any).select("*").order("sort_order"),
       supabase.from("luxlait_employee_machine_skills" as any).select("employee_id, machine_id"),
       supabase.from("luxlait_time_slots" as any).select("*").order("sort_order"),
     ]);
-    setTeams((t.data as any) ?? []);
     setMachines((m.data as any) ?? []);
     setEmployees((e.data as any) ?? []);
     setStatuses((s.data as any) ?? []);
     setSkills((sk.data as any) ?? []);
     setTimeSlots((ts.data as any) ?? []);
+
+    try {
+      const token = localStorage.getItem(JWT_STORAGE_KEY);
+      if (!token) return;
+      const res = await fetch("/api/planning/luxlait_closed_weekdays", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const json = await res.json().catch(() => ({}));
+      if (res.ok && Array.isArray(json?.weekdays)) {
+        setClosedWeekdays(json.weekdays);
+      }
+    } catch {
+      // keep planning usable if closed day config cannot be loaded
+    }
   };
 
   const fetchMonthData = async () => {
@@ -90,6 +110,25 @@ export default function Planning() {
     ]);
     setDailyAssignments((a.data as any) ?? []);
     setEmpStatuses((es.data as any) ?? []);
+
+    try {
+      const token = localStorage.getItem(JWT_STORAGE_KEY);
+      if (!token) return;
+      const url = new URL("/api/planning/luxlait_closed_days", window.location.origin);
+      url.searchParams.set("fromDate", monthStart);
+      url.searchParams.set("toDate", monthEnd);
+      const res = await fetch(url.toString(), {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const json = await res.json().catch(() => []);
+      if (res.ok && Array.isArray(json)) {
+        setClosedDays(json as ClosedDay[]);
+      } else {
+        setClosedDays([]);
+      }
+    } catch {
+      setClosedDays([]);
+    }
   };
 
   useEffect(() => { fetchAll(); }, []);
@@ -98,6 +137,33 @@ export default function Planning() {
     setAutoPlanFromDate(monthStart);
     setAutoPlanToDate(monthEnd);
   }, [monthStart, monthEnd]);
+  useEffect(() => {
+    const today = new Date();
+    const isCurrentDisplayedMonth =
+      today.getFullYear() === currentMonth.getFullYear() &&
+      today.getMonth() === currentMonth.getMonth();
+    const defaultWeekRef = isCurrentDisplayedMonth ? format(today, "yyyy-MM-dd") : (monthDays[0] ?? null);
+    setMainWeekStart(clampWeekStart(defaultWeekRef, monthDays));
+  }, [monthDays, currentMonth]);
+  useEffect(() => {
+    const today = format(new Date(), "yyyy-MM-dd");
+    const hasTodayInPreviewRange = previewDays.includes(today);
+    const defaultWeekRef = hasTodayInPreviewRange ? today : (previewDays[0] ?? null);
+    setPreviewWeekStart(clampWeekStart(defaultWeekRef, previewDays));
+  }, [previewDays]);
+  useEffect(() => {
+    if (!employees.length) {
+      setSelectedEmployeeIds([]);
+      return;
+    }
+    const allIds = employees.map((e) => e.id);
+    if (!employeeFilterTouched) {
+      setSelectedEmployeeIds(allIds);
+      return;
+    }
+    const available = new Set(allIds);
+    setSelectedEmployeeIds((prev) => prev.filter((id) => available.has(id)));
+  }, [employees, employeeFilterTouched]);
 
   // Maps
   const assignmentMap = useMemo(() => {
@@ -136,31 +202,65 @@ export default function Planning() {
     return m;
   }, [timeSlots]);
 
+  const closedDaySet = useMemo(() => new Set(closedDays.map((d) => d.day_date)), [closedDays]);
+
+  const isClosedDay = (day: string): boolean => {
+    if (closedDaySet.has(day)) return true;
+    if (!closedWeekdays.length) return false;
+    const weekDay = new Date(`${day}T00:00:00`).getDay();
+    return closedWeekdays.includes(weekDay);
+  };
+
   const skillSet = useMemo(() => {
     const s = new Set<string>();
     skills.forEach((sk) => s.add(`${sk.employee_id}_${sk.machine_id}`));
     return s;
   }, [skills]);
 
-  // Group employees by team
-  const employeesByTeam = useMemo(() => {
-    const m = new Map<string, Employee[]>();
-    teams.forEach((t) => m.set(t.id, []));
-    employees.forEach((e) => {
-      if (e.default_team_id && m.has(e.default_team_id)) {
-        m.get(e.default_team_id)!.push(e);
-      }
+  const sortedEmployees = useMemo(
+    () => [...employees].sort((a, b) => a.last_name.localeCompare(b.last_name)),
+    [employees]
+  );
+  const selectedEmployeeIdSet = useMemo(() => new Set(selectedEmployeeIds), [selectedEmployeeIds]);
+  const filteredEmployees = useMemo(
+    () => sortedEmployees.filter((emp) => selectedEmployeeIdSet.has(emp.id)),
+    [sortedEmployees, selectedEmployeeIdSet]
+  );
+
+  const clampWeekStart = (candidate: string | null, days: string[]): string | null => {
+    if (!days.length) return null;
+    const firstDay = parseISO(days[0]);
+    const lastDay = parseISO(days[days.length - 1]);
+    const firstWeekStart = startOfWeek(firstDay, { weekStartsOn: 1 });
+    const lastWeekStart = startOfWeek(lastDay, { weekStartsOn: 1 });
+    const base = candidate ? parseISO(candidate) : firstDay;
+    let next = startOfWeek(base, { weekStartsOn: 1 });
+    if (next < firstWeekStart) next = firstWeekStart;
+    if (next > lastWeekStart) next = lastWeekStart;
+    return format(next, "yyyy-MM-dd");
+  };
+
+  const getVisibleWeekDays = (days: string[], weekStart: string | null): string[] => {
+    if (!days.length) return [];
+    const clampedWeekStart = clampWeekStart(weekStart, days);
+    if (!clampedWeekStart) return days;
+    const start = parseISO(clampedWeekStart);
+    const end = addDays(start, 6);
+    return days.filter((day) => {
+      const d = parseISO(day);
+      return d >= start && d <= end;
     });
-    // Sort: leaders first, then backups, then alphabetical
-    m.forEach((emps) => {
-      emps.sort((a, b) => {
-        if (a.is_team_leader !== b.is_team_leader) return a.is_team_leader ? -1 : 1;
-        if (a.is_backup !== b.is_backup) return a.is_backup ? -1 : 1;
-        return a.last_name.localeCompare(b.last_name);
-      });
-    });
-    return m;
-  }, [teams, employees]);
+  };
+
+  const visibleMainDays = useMemo(() => {
+    if (mainViewRangeMode === "month") return monthDays;
+    return getVisibleWeekDays(monthDays, mainWeekStart);
+  }, [monthDays, mainViewRangeMode, mainWeekStart]);
+
+  const visiblePreviewDays = useMemo(() => {
+    if (previewRangeMode === "fullRange") return previewDays;
+    return getVisibleWeekDays(previewDays, previewWeekStart);
+  }, [previewDays, previewRangeMode, previewWeekStart]);
 
   // Get machines an employee is qualified for
   const getQualifiedMachines = (employeeId: string) => {
@@ -192,6 +292,20 @@ export default function Planning() {
     });
     return m;
   }, [autoPlanProposedAssignments]);
+  const filteredAssignmentsByMachineDay = useMemo(() => {
+    const m = new Map<string, DailyAssignment[]>();
+    assignmentsByMachineDay.forEach((rows, key) => {
+      m.set(key, rows.filter((a) => selectedEmployeeIdSet.has(a.employee_id)));
+    });
+    return m;
+  }, [assignmentsByMachineDay, selectedEmployeeIdSet]);
+  const filteredProposedByMachineDay = useMemo(() => {
+    const m = new Map<string, DailyAssignment[]>();
+    proposedByMachineDay.forEach((rows, key) => {
+      m.set(key, rows.filter((a) => selectedEmployeeIdSet.has(a.employee_id)));
+    });
+    return m;
+  }, [proposedByMachineDay, selectedEmployeeIdSet]);
 
   const machineGroups = useMemo(() => {
     const groupMap = new Map<string, Machine[]>();
@@ -212,7 +326,7 @@ export default function Planning() {
   }, [machines]);
 
   // Handlers
-  const handleAssign = async (employeeId: string, dayDate: string, machineId: string | null, timeSlotId: string | null, teamId: string) => {
+  const handleAssign = async (employeeId: string, dayDate: string, machineId: string | null, timeSlotId: string | null) => {
     const existing = assignmentMap.get(`${employeeId}_${dayDate}`);
     if (machineId === null && existing) {
       await supabase.from("luxlait_daily_assignments" as any).delete().eq("id", existing.id);
@@ -224,7 +338,6 @@ export default function Planning() {
         employee_id: employeeId,
         machine_id: machineId,
         time_slot_id: timeSlotId,
-        team_id: teamId,
       });
     }
     fetchMonthData();
@@ -261,7 +374,6 @@ export default function Planning() {
         employee_id: a.employee_id,
         machine_id: a.machine_id,
         time_slot_id: a.time_slot_id,
-        team_id: a.team_id,
       };
     });
     const { error } = await supabase.from("luxlait_daily_assignments" as any).upsert(inserts, { onConflict: "day_date,employee_id" });
@@ -274,7 +386,7 @@ export default function Planning() {
   };
 
   const requestAutoPlan = async () => {
-    if (!isManager) return;
+    if (!canUseAutoPlan) return;
 
     const token = localStorage.getItem(JWT_STORAGE_KEY);
     if (!token) {
@@ -328,7 +440,6 @@ export default function Planning() {
         employee_id: a.employee_id,
         machine_id: a.machine_id,
         time_slot_id: a.time_slot_id ?? null,
-        team_id: a.team_id,
       })) as DailyAssignment[];
 
       setAutoPlanProposedAssignments(proposed);
@@ -360,7 +471,6 @@ export default function Planning() {
             employee_id: a.employee_id,
             machine_id: a.machine_id,
             time_slot_id: a.time_slot_id,
-            team_id: a.team_id,
           })),
         }),
       });
@@ -386,6 +496,35 @@ export default function Planning() {
     }
   };
 
+  const shiftMainWeek = (delta: -1 | 1) => {
+    const base = clampWeekStart(mainWeekStart, monthDays);
+    if (!base) return;
+    setMainWeekStart(clampWeekStart(format((delta < 0 ? subWeeks : addWeeks)(parseISO(base), 1), "yyyy-MM-dd"), monthDays));
+  };
+
+  const shiftPreviewWeek = (delta: -1 | 1) => {
+    const base = clampWeekStart(previewWeekStart, previewDays);
+    if (!base) return;
+    setPreviewWeekStart(clampWeekStart(format((delta < 0 ? subWeeks : addWeeks)(parseISO(base), 1), "yyyy-MM-dd"), previewDays));
+  };
+
+  const toggleEmployee = (employeeId: string) => {
+    setEmployeeFilterTouched(true);
+    setSelectedEmployeeIds((prev) =>
+      prev.includes(employeeId) ? prev.filter((id) => id !== employeeId) : [...prev, employeeId]
+    );
+  };
+
+  const selectAllEmployees = () => {
+    setEmployeeFilterTouched(true);
+    setSelectedEmployeeIds(sortedEmployees.map((e) => e.id));
+  };
+
+  const clearAllEmployees = () => {
+    setEmployeeFilterTouched(true);
+    setSelectedEmployeeIds([]);
+  };
+
   return (
     <div className="space-y-4">
       {/* Month selector */}
@@ -404,11 +543,38 @@ export default function Planning() {
             <Copy className="h-4 w-4 mr-1" /> Dupliquer mois précédent
           </Button>
         )}
-        {isManager && (
+        {canUseAutoPlan && (
           <Button variant="outline" size="sm" onClick={() => setAutoPlanFormOpen(true)} disabled={autoPlanLoading}>
             Auto Plan
           </Button>
         )}
+        <ToggleGroup
+          type="single"
+          value={mainViewRangeMode}
+          onValueChange={(v) => { if (v) setMainViewRangeMode(v as "month" | "week"); }}
+          size="sm"
+          variant="outline"
+        >
+          <ToggleGroupItem value="month" className="text-xs">Mois</ToggleGroupItem>
+          <ToggleGroupItem value="week" className="text-xs">Semaine</ToggleGroupItem>
+        </ToggleGroup>
+        {mainViewRangeMode === "week" && (
+          <div className="flex items-center gap-1">
+            <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => shiftMainWeek(-1)}>
+              <ChevronLeft className="h-4 w-4" />
+            </Button>
+            <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => shiftMainWeek(1)}>
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
+        )}
+        <EmployeeFilterPopover
+          employees={sortedEmployees}
+          selectedEmployeeIds={selectedEmployeeIds}
+          onToggleEmployee={toggleEmployee}
+          onSelectAll={selectAllEmployees}
+          onClearAll={clearAllEmployees}
+        />
         <div className="ml-auto">
           <ToggleGroup
             type="single"
@@ -456,86 +622,70 @@ export default function Planning() {
               <th className="p-2 text-left font-medium text-muted-foreground min-w-[160px] sticky left-0 bg-muted/50 z-10 border-r">
                 Employé
               </th>
-              {monthDays.map((day) => {
+              {visibleMainDays.map((day) => {
                 const d = new Date(day + "T00:00:00");
                 const dayNum = d.getDate();
                 const dayOfWeek = d.getDay();
                 const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+                const closed = isClosedDay(day);
                 return (
                   <th
                     key={day}
-                    className={`p-1 text-center font-medium min-w-[60px] ${isWeekend ? "bg-muted" : ""}`}
+                    className={`p-1 text-center font-medium min-w-[60px] ${isWeekend ? "bg-muted" : ""} ${closed ? "bg-red-50" : ""}`}
                   >
                     <div className="text-muted-foreground text-[9px]">{DAY_ABBR[dayOfWeek]}</div>
                     <div className="text-xs">{dayNum}</div>
+                    {closed ? <div className="text-[9px] text-red-600">Fermé</div> : null}
                   </th>
                 );
               })}
             </tr>
           </thead>
           <tbody>
-            {teams.map((team) => {
-              const teamEmployees = employeesByTeam.get(team.id) ?? [];
-              return (
-                <React.Fragment key={team.id}>
-                  {/* Team header row */}
-                  <tr className="bg-muted">
-                    <td
-                      colSpan={1 + daysInMonth}
-                      className="p-1 px-2 text-xs font-semibold uppercase sticky left-0 z-10"
-                      style={{ color: team.color, borderBottom: `2px solid ${team.color}` }}
-                    >
-                      {team.name}
-                    </td>
-                  </tr>
-                  {teamEmployees.map((emp) => (
-                    <tr key={emp.id} className="border-b hover:bg-muted/30">
-                      <td className="p-1 font-medium sticky left-0 bg-card z-10 border-r text-xs whitespace-nowrap">
-                        <div className="flex items-center gap-1">
-                          {emp.is_team_leader && <span className="text-[8px] font-bold text-primary" title="Chef d'équipe">★</span>}
-                          {emp.is_backup && <span className="text-[8px] font-bold text-muted-foreground" title="Back Up">◆</span>}
-                          {emp.first_name} {emp.last_name}
-                        </div>
-                      </td>
-                      {monthDays.map((day) => {
-                        const d = new Date(day + "T00:00:00");
-                        const isWeekend = d.getDay() === 0 || d.getDay() === 6;
-                        return (
-                          <PlanningCell
-                            key={day}
-                            employee={emp}
-                            dayDate={day}
-                            teamId={team.id}
-                            canEditPlanning={canEditPlanning}
-                            isWeekend={isWeekend}
-                            assignment={assignmentMap.get(`${emp.id}_${day}`) ?? null}
-                            statusId={empStatusMap.get(`${emp.id}_${day}`) ?? null}
-                            statusMap={statusMap}
-                            statuses={statuses}
-                            machineMap={machineMap}
-                            timeSlotMap={timeSlotMap}
-                            qualifiedMachines={getQualifiedMachines(emp.id)}
-                            timeSlots={timeSlots}
-                            onAssign={handleAssign}
-                            onSetStatus={handleSetDayStatus}
-                          />
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </React.Fragment>
-              );
-            })}
+            {filteredEmployees.map((emp) => (
+              <tr key={emp.id} className="border-b hover:bg-muted/30">
+                <td className="p-1 font-medium sticky left-0 bg-card z-10 border-r text-xs whitespace-nowrap">
+                  <div className="flex items-center gap-1">
+                    {emp.is_backup && <span className="text-[8px] font-bold text-muted-foreground" title="Back Up">◆</span>}
+                    {emp.first_name} {emp.last_name}
+                  </div>
+                </td>
+                {visibleMainDays.map((day) => {
+                  const d = new Date(day + "T00:00:00");
+                  const isWeekend = d.getDay() === 0 || d.getDay() === 6;
+                  return (
+                    <PlanningCell
+                      key={day}
+                      employee={emp}
+                      dayDate={day}
+                      canEditPlanning={canEditPlanning}
+                      isWeekend={isWeekend}
+                      assignment={assignmentMap.get(`${emp.id}_${day}`) ?? null}
+                      statusId={empStatusMap.get(`${emp.id}_${day}`) ?? null}
+                      statusMap={statusMap}
+                      statuses={statuses}
+                      machineMap={machineMap}
+                      timeSlotMap={timeSlotMap}
+                      qualifiedMachines={getQualifiedMachines(emp.id)}
+                      timeSlots={timeSlots}
+                      onAssign={handleAssign}
+                      onSetStatus={handleSetDayStatus}
+                    />
+                  );
+                })}
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
       ) : (
         <MachineGrid
-          days={monthDays}
+          days={visibleMainDays}
           machineGroups={machineGroups}
-          getAssignments={(key) => assignmentsByMachineDay.get(key) ?? []}
+          getAssignments={(key) => filteredAssignmentsByMachineDay.get(key) ?? []}
           employeeMap={employeeMap}
           timeSlotMap={timeSlotMap}
+          spacious={false}
         />
       )}
       
@@ -595,142 +745,158 @@ export default function Planning() {
         }
       }}
     >
-      <DialogContent className="max-w-6xl max-h-[80vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Preview Auto Plan</DialogTitle>
-          <div className="flex items-center justify-between">
-            <div className="text-xs text-muted-foreground">
-              {autoPlanStats?.durationMs ? `Solver duration: ${String(autoPlanStats.durationMs)} ms` : null}
+      <DialogContent className="w-[98vw] sm:w-[96vw] max-w-[1400px] h-[92vh] max-h-[92vh] p-3 sm:p-4 flex flex-col">
+        <DialogHeader className="space-y-3 pb-1">
+          <DialogTitle className="text-base sm:text-lg">Preview Auto Plan</DialogTitle>
+          <div className="w-full overflow-x-auto">
+            <div className="min-w-max flex items-center gap-3 justify-between">
+              <div className="text-sm text-muted-foreground whitespace-nowrap">
+                {autoPlanStats?.durationMs ? `Solver duration: ${String(autoPlanStats.durationMs)} ms` : null}
+              </div>
+              <div className="shrink-0">
+                <div className="flex items-center gap-2">
+                  <ToggleGroup
+                    type="single"
+                    value={previewRangeMode}
+                    onValueChange={(v) => { if (v) setPreviewRangeMode(v as "fullRange" | "week"); }}
+                    size="sm"
+                    variant="outline"
+                  >
+                    <ToggleGroupItem value="fullRange" className="text-sm px-3">Période</ToggleGroupItem>
+                    <ToggleGroupItem value="week" className="text-sm px-3">Semaine</ToggleGroupItem>
+                  </ToggleGroup>
+                  {previewRangeMode === "week" && (
+                    <div className="flex items-center gap-1">
+                      <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => shiftPreviewWeek(-1)}>
+                        <ChevronLeft className="h-4 w-4" />
+                      </Button>
+                      <Button variant="outline" size="icon" className="h-8 w-8" onClick={() => shiftPreviewWeek(1)}>
+                        <ChevronRight className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  )}
+                  <ToggleGroup
+                    type="single"
+                    value={previewViewMode}
+                    onValueChange={(v) => { if (v) setPreviewViewMode(v as "employee" | "machine"); }}
+                    size="sm"
+                    variant="outline"
+                  >
+                    <ToggleGroupItem value="employee" className="text-sm gap-1.5 px-3">
+                      <Users className="h-4 w-4" /> Employees
+                    </ToggleGroupItem>
+                    <ToggleGroupItem value="machine" className="text-sm gap-1.5 px-3">
+                      <Factory className="h-4 w-4" /> Machines
+                    </ToggleGroupItem>
+                  </ToggleGroup>
+                  <EmployeeFilterPopover
+                    employees={sortedEmployees}
+                    selectedEmployeeIds={selectedEmployeeIds}
+                    onToggleEmployee={toggleEmployee}
+                    onSelectAll={selectAllEmployees}
+                    onClearAll={clearAllEmployees}
+                    compact
+                  />
+                </div>
+              </div>
             </div>
-            <ToggleGroup
-              type="single"
-              value={previewViewMode}
-              onValueChange={(v) => { if (v) setPreviewViewMode(v as "employee" | "machine"); }}
-              size="sm"
-              variant="outline"
-            >
-              <ToggleGroupItem value="employee" className="text-xs gap-1">
-                <Users className="h-3.5 w-3.5" /> Employees
-              </ToggleGroupItem>
-              <ToggleGroupItem value="machine" className="text-xs gap-1">
-                <Factory className="h-3.5 w-3.5" /> Machines
-              </ToggleGroupItem>
-            </ToggleGroup>
           </div>
         </DialogHeader>
 
-        <div className="space-y-3">
+        <div className="space-y-3 flex-1 min-h-0 overflow-y-auto">
           {previewViewMode === "employee" ? (
-          <div className="overflow-x-auto border rounded-lg">
-            <table className="w-full text-xs border-collapse">
+          <div className="overflow-x-auto rounded-lg border border-border/40 bg-card/40">
+            <table className="w-full text-sm border-collapse">
               <thead>
-                <tr className="border-b bg-muted/50">
-                  <th className="p-2 text-left font-medium text-muted-foreground min-w-[160px] sticky left-0 bg-muted/50 z-10 border-r">
+                <tr className="border-b border-border/40 bg-muted/40">
+                  <th className="p-3 text-left font-medium text-muted-foreground min-w-[220px] sticky left-0 bg-muted/50 z-10 border-r">
                     Employee
                   </th>
-                  {previewDays.map((day) => {
+                  {visiblePreviewDays.map((day) => {
                     const d = new Date(day + "T00:00:00");
                     const dayNum = d.getDate();
                     const dayOfWeek = d.getDay();
                     const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
                     return (
-                      <th key={day} className={`p-1 text-center font-medium min-w-[60px] ${isWeekend ? "bg-muted" : ""}`}>
-                        <div className="text-muted-foreground text-[9px]">{DAY_ABBR[dayOfWeek]}</div>
-                        <div className="text-xs">{dayNum}</div>
+                      <th key={day} className={`p-2 text-center font-medium min-w-[84px] ${isWeekend ? "bg-muted" : ""}`}>
+                        <div className="text-muted-foreground text-xs">{DAY_ABBR[dayOfWeek]}</div>
+                        <div className="text-sm">{dayNum}</div>
                       </th>
                     );
                   })}
                 </tr>
               </thead>
               <tbody>
-                {teams.map((team) => {
-                  const teamEmployees = employeesByTeam.get(team.id) ?? [];
-                  return (
-                    <React.Fragment key={team.id}>
-                      <tr className="bg-muted">
-                        <td
-                          colSpan={1 + previewDays.length}
-                          className="p-1 px-2 text-xs font-semibold uppercase sticky left-0 z-10"
-                          style={{ color: team.color, borderBottom: `2px solid ${team.color}` }}
-                        >
-                          {team.name}
-                        </td>
-                      </tr>
-                      {teamEmployees.map((emp) => (
-                        <tr key={emp.id} className="border-b hover:bg-muted/30">
-                          <td className="p-1 font-medium sticky left-0 bg-card z-10 border-r text-xs whitespace-nowrap">
-                            <div className="flex items-center gap-1">
-                              {emp.is_team_leader && (
-                                <span className="text-[8px] font-bold text-primary" title="Team leader">
-                                  ★
-                                </span>
-                              )}
-                              {emp.is_backup && (
-                                <span className="text-[8px] font-bold text-muted-foreground" title="Backup">
-                                  ◆
-                                </span>
-                              )}
-                              {emp.first_name} {emp.last_name}
-                            </div>
-                          </td>
-                          {previewDays.map((day) => {
-                            const key = `${emp.id}_${day}`;
-                            const existing = assignmentMap.get(key) ?? null;
-                            const proposed = proposedAssignmentMap.get(key) ?? null;
-                            const isDifferent =
-                              (existing?.machine_id ?? null) !== (proposed?.machine_id ?? null) ||
-                              (existing?.time_slot_id ?? null) !== (proposed?.time_slot_id ?? null);
-                            const d = new Date(day + "T00:00:00");
-                            const isWeekend = d.getDay() === 0 || d.getDay() === 6;
-                            return (
-                              <PlanningCell
-                                key={day}
-                                employee={emp}
-                                dayDate={day}
-                                teamId={team.id}
-                                canEditPlanning={false}
-                                isWeekend={isWeekend}
-                                assignment={proposed}
-                                statusId={empStatusMap.get(key) ?? null}
-                                statusMap={statusMap}
-                                statuses={statuses}
-                                machineMap={machineMap}
-                                timeSlotMap={timeSlotMap}
-                                qualifiedMachines={getQualifiedMachines(emp.id)}
-                                timeSlots={timeSlots}
-                                onAssign={(_empId, _day, _machineId, _timeSlotId, _teamId) => undefined}
-                                onSetStatus={(_empId, _day, _statusId) => undefined}
-                                isProposedChange={isDifferent}
-                              />
-                            );
-                          })}
-                        </tr>
-                      ))}
-                    </React.Fragment>
-                  );
-                })}
+                {filteredEmployees.map((emp) => (
+                  <tr key={emp.id} className="border-b border-border/30 hover:bg-muted/30">
+                    <td className="p-2 font-medium sticky left-0 bg-card z-10 border-r text-sm whitespace-nowrap">
+                      <div className="flex items-center gap-1">
+                        {emp.is_backup && (
+                          <span className="text-[8px] font-bold text-muted-foreground" title="Backup">
+                            ◆
+                          </span>
+                        )}
+                        {emp.first_name} {emp.last_name}
+                      </div>
+                    </td>
+                    {visiblePreviewDays.map((day) => {
+                      const key = `${emp.id}_${day}`;
+                      const existing = assignmentMap.get(key) ?? null;
+                      const proposed = proposedAssignmentMap.get(key) ?? null;
+                      const isDifferent =
+                        (existing?.machine_id ?? null) !== (proposed?.machine_id ?? null) ||
+                        (existing?.time_slot_id ?? null) !== (proposed?.time_slot_id ?? null);
+                      const d = new Date(day + "T00:00:00");
+                      const isWeekend = d.getDay() === 0 || d.getDay() === 6;
+                      return (
+                        <PlanningCell
+                          key={day}
+                          employee={emp}
+                          dayDate={day}
+                          canEditPlanning={false}
+                          isWeekend={isWeekend}
+                          assignment={proposed}
+                          statusId={empStatusMap.get(key) ?? null}
+                          statusMap={statusMap}
+                          statuses={statuses}
+                          machineMap={machineMap}
+                          timeSlotMap={timeSlotMap}
+                          qualifiedMachines={getQualifiedMachines(emp.id)}
+                          timeSlots={timeSlots}
+                          onAssign={(_empId, _day, _machineId, _timeSlotId) => undefined}
+                          onSetStatus={(_empId, _day, _statusId) => undefined}
+                          isProposedChange={isDifferent}
+                          spacious
+                        />
+                      );
+                    })}
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
           ) : (
             <MachineGrid
-              days={previewDays}
+              days={visiblePreviewDays}
               machineGroups={machineGroups}
-              getAssignments={(key) => proposedByMachineDay.get(key) ?? []}
-              getExistingAssignments={(key) => assignmentsByMachineDay.get(key) ?? []}
+              getAssignments={(key) => filteredProposedByMachineDay.get(key) ?? []}
+              getExistingAssignments={(key) => filteredAssignmentsByMachineDay.get(key) ?? []}
               employeeMap={employeeMap}
               timeSlotMap={timeSlotMap}
               showChanges
+              spacious
             />
           )}
 
-          <div className="flex items-center justify-end gap-2">
-            <Button variant="outline" onClick={() => { setAutoPlanPreviewOpen(false); setAutoPlanProposedAssignments([]); }}>
+          <div className="w-full overflow-x-auto pt-2 border-t border-border/40">
+            <div className="min-w-max flex items-center justify-end gap-2">
+              <Button variant="outline" onClick={() => { setAutoPlanPreviewOpen(false); setAutoPlanProposedAssignments([]); }}>
               Cancel
-            </Button>
-            <Button onClick={approveAutoPlan} disabled={autoPlanApproveLoading}>
-              {autoPlanApproveLoading ? "Saving..." : "Approve and Save"}
-            </Button>
+              </Button>
+              <Button onClick={approveAutoPlan} disabled={autoPlanApproveLoading}>
+                {autoPlanApproveLoading ? "Saving..." : "Approve and Save"}
+              </Button>
+            </div>
           </div>
         </div>
       </DialogContent>
@@ -744,7 +910,6 @@ export default function Planning() {
 function PlanningCell({
   employee,
   dayDate,
-  teamId,
   canEditPlanning,
   isWeekend,
   assignment,
@@ -758,10 +923,10 @@ function PlanningCell({
   onAssign,
   onSetStatus,
   isProposedChange,
+  spacious,
 }: {
   employee: Employee;
   dayDate: string;
-  teamId: string;
   canEditPlanning: boolean;
   isWeekend: boolean;
   assignment: DailyAssignment | null;
@@ -772,9 +937,10 @@ function PlanningCell({
   timeSlotMap: Map<string, TimeSlot>;
   qualifiedMachines: Machine[];
   timeSlots: TimeSlot[];
-  onAssign: (empId: string, day: string, machineId: string | null, timeSlotId: string | null, teamId: string) => void;
+  onAssign: (empId: string, day: string, machineId: string | null, timeSlotId: string | null) => void;
   onSetStatus: (empId: string, day: string, statusId: string | null) => void;
   isProposedChange?: boolean;
+  spacious?: boolean;
 }) {
   const status = statusId ? statusMap.get(statusId) : null;
   const machine = assignment ? machineMap.get(assignment.machine_id) : null;
@@ -792,7 +958,7 @@ function PlanningCell({
   const cellContent = () => {
     if (status) {
       return (
-        <span className="text-[8px] font-bold" style={{ color: "#fff" }}>
+        <span className={`${spacious ? "text-[10px]" : "text-[8px]"} font-bold`} style={{ color: "#fff" }}>
           {status.name.substring(0, 3)}
         </span>
       );
@@ -802,13 +968,16 @@ function PlanningCell({
       const tsLabel = timeSlot ? (timeSlot.short_name || timeSlot.name) : "";
       const display = tsLabel ? `${mLabel}-${tsLabel}` : mLabel;
       return (
-        <div className="flex flex-col items-center gap-0.5">
-          <span className="text-[9px] font-semibold leading-tight truncate max-w-[54px]" title={`${machine.name}${timeSlot ? ' – ' + timeSlot.name : ''}`}>
+        <div className={`flex flex-col items-center ${spacious ? "gap-1" : "gap-0.5"}`}>
+          <span
+            className={`${spacious ? "text-[11px] max-w-[74px]" : "text-[9px] max-w-[54px]"} font-semibold leading-tight truncate`}
+            title={`${machine.name}${timeSlot ? " - " + timeSlot.name : ""}`}
+          >
             {display}
           </span>
           {timeSlot && (
             <span
-              className="inline-block h-2 w-2 rounded-full"
+              className={`inline-block rounded-full ${spacious ? "h-2.5 w-2.5" : "h-2 w-2"}`}
               style={{ backgroundColor: timeSlot.color }}
               title={timeSlot.name}
             />
@@ -816,16 +985,16 @@ function PlanningCell({
         </div>
       );
     }
-    return <span className="text-muted-foreground text-[9px]">·</span>;
+    return <span className={`text-muted-foreground ${spacious ? "text-xs" : "text-[9px]"}`}>·</span>;
   };
 
   if (!canEditPlanning) {
     return (
       <td
-        className={`p-0 text-center border-r ${isProposedChange ? "ring-2 ring-primary ring-offset-1" : ""}`}
+        className={`p-0 text-center border-r border-border/30 ${isProposedChange ? "ring-1 ring-primary/70 ring-inset" : ""}`}
         style={cellBg ? { backgroundColor: cellBg } : {}}
       >
-        <div className="flex items-center justify-center h-8">
+        <div className={`flex items-center justify-center ${spacious ? "h-10" : "h-8"}`}>
           {cellContent()}
         </div>
       </td>
@@ -834,12 +1003,12 @@ function PlanningCell({
 
   return (
     <td
-      className={`p-0 text-center border-r ${isProposedChange ? "ring-2 ring-primary ring-offset-1" : ""}`}
+      className={`p-0 text-center border-r border-border/30 ${isProposedChange ? "ring-1 ring-primary/70 ring-inset" : ""}`}
       style={cellBg ? { backgroundColor: cellBg } : {}}
     >
       <Popover>
         <PopoverTrigger asChild>
-          <button className="w-full h-8 flex items-center justify-center hover:opacity-80 transition-opacity cursor-pointer">
+          <button className={`w-full flex items-center justify-center hover:opacity-80 transition-opacity cursor-pointer ${spacious ? "h-10" : "h-8"}`}>
             {cellContent()}
           </button>
         </PopoverTrigger>
@@ -852,9 +1021,9 @@ function PlanningCell({
                 value={assignment?.machine_id ?? ""}
                 onValueChange={(val) => {
                   if (val === "__remove__") {
-                    onAssign(employee.id, dayDate, null, null, teamId);
+                    onAssign(employee.id, dayDate, null, null);
                   } else {
-                    onAssign(employee.id, dayDate, val, assignment?.time_slot_id ?? null, teamId);
+                    onAssign(employee.id, dayDate, val, assignment?.time_slot_id ?? null);
                   }
                 }}
               >
@@ -890,7 +1059,7 @@ function PlanningCell({
                   value={assignment.time_slot_id ?? ""}
                   onValueChange={(val) => {
                     const slotId = val === "__none__" ? null : val;
-                    onAssign(employee.id, dayDate, assignment.machine_id, slotId, teamId);
+                    onAssign(employee.id, dayDate, assignment.machine_id, slotId);
                   }}
                 >
                   <SelectTrigger className="h-7 text-xs">
@@ -952,6 +1121,7 @@ function MachineGrid({
   employeeMap,
   timeSlotMap,
   showChanges,
+  spacious,
 }: {
   days: string[];
   machineGroups: { group: string; machines: Machine[] }[];
@@ -960,13 +1130,14 @@ function MachineGrid({
   employeeMap: Map<string, Employee>;
   timeSlotMap: Map<string, TimeSlot>;
   showChanges?: boolean;
+  spacious?: boolean;
 }) {
   return (
-    <div className="overflow-x-auto border rounded-lg">
-      <table className="w-full text-xs border-collapse">
+    <div className="overflow-x-auto rounded-lg border border-border/40 bg-card/40">
+      <table className={`w-full border-collapse ${spacious ? "text-sm" : "text-xs"}`}>
         <thead>
-          <tr className="border-b bg-muted/50">
-            <th className="p-2 text-left font-medium text-muted-foreground min-w-[160px] sticky left-0 bg-muted/50 z-10 border-r">
+          <tr className="border-b border-border/40 bg-muted/40">
+            <th className={`text-left font-medium text-muted-foreground sticky left-0 bg-muted/50 z-10 border-r ${spacious ? "p-3 min-w-[220px]" : "p-2 min-w-[160px]"}`}>
               Machine
             </th>
             {days.map((day) => {
@@ -977,10 +1148,10 @@ function MachineGrid({
               return (
                 <th
                   key={day}
-                  className={`p-1 text-center font-medium min-w-[60px] ${isWeekend ? "bg-muted" : ""}`}
+                  className={`text-center font-medium ${spacious ? "p-2 min-w-[84px]" : "p-1 min-w-[60px]"} ${isWeekend ? "bg-muted" : ""}`}
                 >
-                  <div className="text-muted-foreground text-[9px]">{DAY_ABBR[dayOfWeek]}</div>
-                  <div className="text-xs">{dayNum}</div>
+                  <div className={`${spacious ? "text-xs" : "text-[9px]"} text-muted-foreground`}>{DAY_ABBR[dayOfWeek]}</div>
+                  <div className={spacious ? "text-sm" : "text-xs"}>{dayNum}</div>
                 </th>
               );
             })}
@@ -989,18 +1160,18 @@ function MachineGrid({
         <tbody>
           {machineGroups.map(({ group, machines: groupMachines }) => (
             <React.Fragment key={group}>
-              <tr className="bg-muted">
+              <tr className="bg-muted/40">
                 <td
                   colSpan={1 + days.length}
-                  className="p-1 px-2 text-xs font-semibold uppercase sticky left-0 z-10"
-                  style={{ borderBottom: "2px solid #6b7280" }}
+                  className={`${spacious ? "p-2 px-3 text-sm" : "p-1 px-2 text-xs"} font-semibold uppercase sticky left-0 z-10`}
+                  style={{ borderBottom: "1px solid hsl(var(--border) / 0.5)" }}
                 >
                   {group}
                 </td>
               </tr>
               {groupMachines.map((machine) => (
-                <tr key={machine.id} className="border-b hover:bg-muted/30">
-                  <td className="p-1 font-medium sticky left-0 bg-card z-10 border-r text-xs whitespace-nowrap">
+                <tr key={machine.id} className="border-b border-border/30 hover:bg-muted/30">
+                  <td className={`${spacious ? "p-2 text-sm" : "p-1 text-xs"} font-medium sticky left-0 bg-card z-10 border-r whitespace-nowrap`}>
                     <div className="flex items-center gap-1">
                       <span>{machine.short_name || machine.name}</span>
                       <span className="text-[8px] text-muted-foreground">({machine.max_employees})</span>
@@ -1030,6 +1201,7 @@ function MachineGrid({
                         timeSlotMap={timeSlotMap}
                         isWeekend={isWeekend}
                         isProposedChange={isProposedChange}
+                        spacious={spacious}
                       />
                     );
                   })}
@@ -1049,21 +1221,23 @@ function MachineDayCell({
   timeSlotMap,
   isWeekend,
   isProposedChange,
+  spacious,
 }: {
   assignments: DailyAssignment[];
   employeeMap: Map<string, Employee>;
   timeSlotMap: Map<string, TimeSlot>;
   isWeekend: boolean;
   isProposedChange?: boolean;
+  spacious?: boolean;
 }) {
   return (
     <td
-      className={`p-0 text-center border-r ${isProposedChange ? "ring-2 ring-primary ring-offset-1" : ""}`}
+      className={`p-0 text-center border-r border-border/30 ${isProposedChange ? "ring-1 ring-primary/70 ring-inset" : ""}`}
       style={isWeekend ? { backgroundColor: "hsl(var(--muted))" } : {}}
     >
-      <div className="flex flex-col items-center justify-center min-h-[32px] gap-0.5 py-0.5">
+      <div className={`flex flex-col items-center justify-center gap-1 ${spacious ? "min-h-[44px] py-1" : "min-h-[32px] py-0.5"}`}>
         {assignments.length === 0 ? (
-          <span className="text-muted-foreground text-[9px]">&middot;</span>
+          <span className={`text-muted-foreground ${spacious ? "text-xs" : "text-[9px]"}`}>&middot;</span>
         ) : (
           assignments.map((a) => {
             const emp = employeeMap.get(a.employee_id);
@@ -1071,16 +1245,16 @@ function MachineDayCell({
             if (!emp) return null;
             const shortName = `${emp.first_name.charAt(0)}.${emp.last_name}`;
             return (
-              <div key={a.employee_id} className="flex items-center gap-0.5 text-[8px] leading-tight">
+              <div key={a.employee_id} className={`flex items-center gap-1 leading-tight ${spacious ? "text-[10px]" : "text-[8px]"}`}>
                 {ts && (
                   <span
-                    className="inline-block h-1.5 w-1.5 rounded-full shrink-0"
+                    className={`inline-block rounded-full shrink-0 ${spacious ? "h-2 w-2" : "h-1.5 w-1.5"}`}
                     style={{ backgroundColor: ts.color }}
                     title={ts.name}
                   />
                 )}
                 <span
-                  className="truncate max-w-[52px] font-medium"
+                  className={`truncate font-medium ${spacious ? "max-w-[74px]" : "max-w-[52px]"}`}
                   title={`${emp.first_name} ${emp.last_name}`}
                 >
                   {shortName}
@@ -1091,5 +1265,68 @@ function MachineDayCell({
         )}
       </div>
     </td>
+  );
+}
+
+function EmployeeFilterPopover({
+  employees,
+  selectedEmployeeIds,
+  onToggleEmployee,
+  onSelectAll,
+  onClearAll,
+  compact,
+}: {
+  employees: Employee[];
+  selectedEmployeeIds: string[];
+  onToggleEmployee: (employeeId: string) => void;
+  onSelectAll: () => void;
+  onClearAll: () => void;
+  compact?: boolean;
+}) {
+  const selectedSet = new Set(selectedEmployeeIds);
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button variant="outline" size={compact ? "sm" : "default"} className="text-xs">
+          Employés {selectedEmployeeIds.length}/{employees.length}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-72 p-2" align="end">
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-xs font-medium text-muted-foreground">Filtre employés</div>
+            <div className="flex items-center gap-1">
+              <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={onSelectAll}>
+                Tous
+              </Button>
+              <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={onClearAll}>
+                Aucun
+              </Button>
+            </div>
+          </div>
+          <div className="max-h-64 overflow-y-auto space-y-1 pr-1">
+            {employees.map((emp) => {
+              const isChecked = selectedSet.has(emp.id);
+              return (
+                <label
+                  key={emp.id}
+                  className="flex items-center gap-2 text-xs rounded px-1.5 py-1 hover:bg-muted cursor-pointer"
+                >
+                  <input
+                    type="checkbox"
+                    checked={isChecked}
+                    onChange={() => onToggleEmployee(emp.id)}
+                    className="h-3.5 w-3.5"
+                  />
+                  <span className="truncate">
+                    {emp.first_name} {emp.last_name}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }

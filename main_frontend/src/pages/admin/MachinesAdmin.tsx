@@ -150,7 +150,7 @@ export default function MachinesAdmin() {
       const osRes = await window.fetch(`/api/planning/luxlait_machines/${resolvedMachineId}/open_shifts`, {
         method: "PUT",
         headers: authHeaders(),
-        body: JSON.stringify({ ids: selectedOpenShiftIds }),
+        body: JSON.stringify({ timeSlotIds: selectedOpenShiftIds }),
       });
       if (!osRes.ok) throw new Error(`Failed to save open shifts: ${osRes.status}`);
 

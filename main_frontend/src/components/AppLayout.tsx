@@ -2,16 +2,16 @@ import { Link, Outlet, useLocation } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { Calendar, Settings, Users, Wrench, Palette, Clock, Grid3X3, LogOut } from "lucide-react";
+import { Calendar, Users, Wrench, Palette, Clock, Grid3X3, LogOut, CalendarX2 } from "lucide-react";
 
 const navItems = [
   { to: "/", label: "Planning", icon: Calendar },
-  { to: "/admin/teams", label: "Équipes", icon: Users, admin: true },
   { to: "/admin/machines", label: "Machines", icon: Wrench, admin: true },
   { to: "/admin/employees", label: "Employés", icon: Users, admin: true },
   { to: "/admin/skills", label: "Compétences", icon: Grid3X3, admin: true },
   { to: "/admin/statuses", label: "Statuts", icon: Palette, admin: true },
   { to: "/admin/timeslots", label: "Créneaux", icon: Clock, admin: true },
+  { to: "/admin/closed-days", label: "Jours fermés", icon: CalendarX2, admin: true },
 ];
 
 export default function AppLayout() {
