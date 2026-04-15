@@ -4,6 +4,61 @@ import prisma from "../lib/prisma";
 const router = express.Router();
 
 const parseYYYYMMDD = (s: string): Date => new Date(`${s}T00:00:00.000Z`);
+const toYYYYMMDD = (d: Date): string => d.toISOString().slice(0, 10);
+const GLOBAL_SHIFT_MIN_DATE = parseYYYYMMDD("1970-01-01");
+
+function expandClosedWeekdays(from: Date, to: Date, weekdays: number[]): string[] {
+  if (!weekdays.length) return [];
+  const weekdaySet = new Set(weekdays);
+  const dates: string[] = [];
+  const cursor = new Date(from);
+  while (cursor <= to) {
+    if (weekdaySet.has(cursor.getUTCDay())) {
+      dates.push(toYYYYMMDD(cursor));
+    }
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return dates;
+}
+
+function listDateRange(from: Date, to: Date): string[] {
+  const dates: string[] = [];
+  const cursor = new Date(from);
+  while (cursor <= to) {
+    dates.push(toYYYYMMDD(cursor));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return dates;
+}
+
+function expandClosedWeekdayShifts(
+  from: Date,
+  to: Date,
+  rows: Array<{ machineId: string; weekday: number; timeSlotId: string }>
+): Array<{ machine_id: string; day_date: string; time_slot_id: string }> {
+  if (!rows.length) return [];
+  const byMachineWeekday = new Map<string, Set<string>>();
+  for (const row of rows) {
+    const key = `${row.machineId}|${row.weekday}`;
+    if (!byMachineWeekday.has(key)) byMachineWeekday.set(key, new Set<string>());
+    byMachineWeekday.get(key)!.add(row.timeSlotId);
+  }
+  const out: Array<{ machine_id: string; day_date: string; time_slot_id: string }> = [];
+  const cursor = new Date(from);
+  while (cursor <= to) {
+    const weekday = cursor.getUTCDay();
+    const dayDate = toYYYYMMDD(cursor);
+    for (const [key, slots] of byMachineWeekday.entries()) {
+      const [machineId, wd] = key.split('|');
+      if (Number(wd) !== weekday) continue;
+      for (const timeSlotId of slots) {
+        out.push({ machine_id: machineId, day_date: dayDate, time_slot_id: timeSlotId });
+      }
+    }
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return out;
+}
 
 const SOLVER_SETTING_KEYS = {
   fairnessWeight: "planning_solver_fairness_weight",
@@ -95,6 +150,8 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
 
     const lockExisting = isReplan ? true : (body.lockExisting ?? true);
 
+    const t0 = performance.now();
+
     const [
       employees,
       machines,
@@ -102,7 +159,12 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       skills,
       timeSlots,
       unavailableDays,
+      unavailableShiftRows,
       machineDowntimes,
+      machineClosedWeekdays,
+      machineDowntimeShifts,
+      machineClosedWeekdayShifts,
+      staffingRequirements,
       settings,
       existingAssignments,
     ] = await Promise.all([
@@ -114,8 +176,19 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       prisma.luxlaitWeeklyEmployeeStatus.findMany({
         where: { dayDate: { gte: from, lte: to } },
       }),
+      prisma.luxlaitWeeklyEmployeeShiftStatus.findMany({
+        where: { dayDate: { gte: from, lte: to } },
+      }),
       prisma.luxlaitMachineDowntime.findMany({
         where: { dayDate: { gte: from, lte: to } },
+      }),
+      prisma.luxlaitMachineClosedWeekday.findMany(),
+      prisma.luxlaitMachineDowntimeShift.findMany({
+        where: { dayDate: { gte: from, lte: to } },
+      }),
+      prisma.luxlaitMachineClosedWeekdayShift.findMany(),
+      prisma.luxlaitMachineStaffingRequirement.findMany({
+        where: { dayDate: GLOBAL_SHIFT_MIN_DATE },
       }),
       prisma.systemSettings.findMany({
         where: {
@@ -136,6 +209,8 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
           })
         : Promise.resolve([]),
     ]);
+
+    const t1 = performance.now();
 
     const settingByKey = new Map(
       (settings as any[]).map((s) => [s.settingKey as string, s.providerConfig] as const)
@@ -175,6 +250,56 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       downtimesByMachineId[dt.machineId]!.push(dt.dayDate.toISOString().slice(0, 10));
     }
 
+    const closedWeekdaysByMachineId: Record<string, number[]> = {};
+    for (const cw of machineClosedWeekdays) {
+      if (!closedWeekdaysByMachineId[cw.machineId]) closedWeekdaysByMachineId[cw.machineId] = [];
+      closedWeekdaysByMachineId[cw.machineId]!.push(cw.weekday);
+    }
+
+    const mergedDowntimesByMachineId: Record<string, string[]> = {};
+    for (const m of machines) {
+      const dated = downtimesByMachineId[m.id] ?? [];
+      const recurring = expandClosedWeekdays(from, to, closedWeekdaysByMachineId[m.id] ?? []);
+      mergedDowntimesByMachineId[m.id] = [...new Set([...dated, ...recurring])].sort();
+    }
+    const planningDates = listDateRange(from, to);
+
+    const expandedClosedShiftRows = expandClosedWeekdayShifts(from, to, machineClosedWeekdayShifts);
+    const machineClosedShifts = [
+      ...machineDowntimeShifts.map((row) => ({
+        machine_id: row.machineId,
+        day_date: row.dayDate.toISOString().slice(0, 10),
+        time_slot_id: row.timeSlotId,
+      })),
+      ...expandedClosedShiftRows,
+    ];
+    const closedShiftKeySet = new Set(
+      machineClosedShifts.map((row) => `${row.machine_id}|${row.day_date}|${row.time_slot_id}`)
+    );
+    const machineDowntimeDayKeySet = new Set(
+      machines.flatMap((m) => (mergedDowntimesByMachineId[m.id] ?? []).map((dayDate) => `${m.id}|${dayDate}`))
+    );
+    const expandedMinRequirements = staffingRequirements.flatMap((row) =>
+      planningDates
+        .map((dayDate) => ({
+          machine_id: row.machineId,
+          day_date: dayDate,
+          time_slot_id: row.timeSlotId,
+          min_employees: row.minEmployees,
+        }))
+        .filter((reqRow) => {
+          const shiftKey = `${reqRow.machine_id}|${reqRow.day_date}|${reqRow.time_slot_id}`;
+          const dayKey = `${reqRow.machine_id}|${reqRow.day_date}`;
+          return !closedShiftKeySet.has(shiftKey) && !machineDowntimeDayKeySet.has(dayKey);
+        })
+    );
+    const unavailableShifts = unavailableShiftRows.map((row) => ({
+      employee_id: row.employeeId,
+      day_date: row.dayDate.toISOString().slice(0, 10),
+      time_slot_id: row.timeSlotId,
+      status_id: row.statusId,
+    }));
+
     const allAssignmentRows = (existingAssignments as any[]).map((a) => ({
       day_date: a.dayDate.toISOString().slice(0, 10),
       employee_id: a.employeeId,
@@ -184,11 +309,96 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
 
     let lockedAssignmentRows = allAssignmentRows;
     let referenceAssignmentRows: typeof allAssignmentRows = [];
+    let freedPairs = new Set<string>();
+    let affectedDays = new Set<string>();
+
+    if (!isReplan && lockExisting) {
+      const assignedCountByShift = new Map<string, number>();
+      for (const a of allAssignmentRows) {
+        if (!a.time_slot_id) continue;
+        const key = `${a.day_date}|${a.machine_id}|${a.time_slot_id}`;
+        assignedCountByShift.set(key, (assignedCountByShift.get(key) ?? 0) + 1);
+      }
+
+      const deficitDays = new Set<string>();
+      for (const reqRow of expandedMinRequirements) {
+        const key = `${reqRow.day_date}|${reqRow.machine_id}|${reqRow.time_slot_id}`;
+        const assigned = assignedCountByShift.get(key) ?? 0;
+        if (assigned < reqRow.min_employees) {
+          deficitDays.add(reqRow.day_date);
+        }
+      }
+
+      if (deficitDays.size > 0) {
+        lockedAssignmentRows = allAssignmentRows.filter((a) => !deficitDays.has(a.day_date));
+        referenceAssignmentRows = allAssignmentRows.filter((a) => deficitDays.has(a.day_date));
+      }
+    }
 
     if (isReplan && replanBoundary) {
       const boundaryStr = replanBoundary.toISOString().slice(0, 10);
-      lockedAssignmentRows = allAssignmentRows.filter((a) => a.day_date < boundaryStr);
-      referenceAssignmentRows = allAssignmentRows.filter((a) => a.day_date >= boundaryStr);
+
+      const beforeBoundary = allAssignmentRows.filter((a) => a.day_date < boundaryStr);
+      const afterBoundary = allAssignmentRows.filter((a) => a.day_date >= boundaryStr);
+
+      const assignmentCreatedAt = new Map<string, Date>();
+      for (const a of existingAssignments as any[]) {
+        const dayStr = a.dayDate.toISOString().slice(0, 10);
+        assignmentCreatedAt.set(`${a.employeeId}|${dayStr}`, a.createdAt);
+      }
+
+      const statusCreatedAt = new Map<string, Date>();
+      for (const u of unavailableDays) {
+        const dayStr = (u as any).dayDate.toISOString().slice(0, 10);
+        statusCreatedAt.set(`${(u as any).employeeId}|${dayStr}`, (u as any).createdAt);
+      }
+
+      const shiftStatusCreatedAt = new Map<string, Date>();
+      for (const u of unavailableShiftRows) {
+        const dayStr = (u as any).dayDate.toISOString().slice(0, 10);
+        shiftStatusCreatedAt.set(`${(u as any).employeeId}|${dayStr}|${(u as any).timeSlotId}`, (u as any).createdAt);
+      }
+
+      freedPairs = new Set<string>();
+      affectedDays = new Set<string>();
+
+      for (const a of afterBoundary) {
+        const empDayKey = `${a.employee_id}|${a.day_date}`;
+        const aCreated = assignmentCreatedAt.get(empDayKey);
+
+        const sCreated = statusCreatedAt.get(empDayKey);
+        if (sCreated && aCreated && sCreated > aCreated) {
+          freedPairs.add(empDayKey);
+          affectedDays.add(a.day_date);
+          continue;
+        }
+
+        if (a.time_slot_id) {
+          const shiftKey = `${a.employee_id}|${a.day_date}|${a.time_slot_id}`;
+          const shCreated = shiftStatusCreatedAt.get(shiftKey);
+          if (shCreated && aCreated && shCreated > aCreated) {
+            freedPairs.add(empDayKey);
+            affectedDays.add(a.day_date);
+          }
+        }
+      }
+
+      for (const a of afterBoundary) {
+        if (affectedDays.has(a.day_date)) {
+          freedPairs.add(`${a.employee_id}|${a.day_date}`);
+        }
+      }
+
+      if (freedPairs.size > 0) {
+        lockedAssignmentRows = [
+          ...beforeBoundary,
+          ...afterBoundary.filter((a) => !freedPairs.has(`${a.employee_id}|${a.day_date}`)),
+        ];
+        referenceAssignmentRows = afterBoundary.filter((a) => freedPairs.has(`${a.employee_id}|${a.day_date}`));
+      } else {
+        lockedAssignmentRows = allAssignmentRows;
+        referenceAssignmentRows = [];
+      }
     }
 
     const solverFromDate = isReplan ? from.toISOString().slice(0, 10) : body.fromDate;
@@ -206,7 +416,7 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
         max_employees: m.maxEmployees,
         importance: m.importance ?? "OPTIONAL",
         open_time_slot_ids: openShiftsByMachineId[m.id] ?? [],
-        downtime_dates: downtimesByMachineId[m.id] ?? [],
+        downtime_dates: mergedDowntimesByMachineId[m.id] ?? [],
       })),
       skills: skills.map((sk) => ({
         employee_id: sk.employeeId,
@@ -223,6 +433,9 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
         day_date: es.dayDate.toISOString().slice(0, 10),
         status_id: es.statusId,
       })),
+      unavailable_shifts: unavailableShifts,
+      machine_closed_shifts: machineClosedShifts,
+      machine_shift_min_requirements: expandedMinRequirements,
       existing_assignments: lockedAssignmentRows,
       reference_assignments: referenceAssignmentRows,
       constraints: {
@@ -236,6 +449,8 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
         stability_weight: isReplan ? dbStabilityWeight : 0,
       },
     };
+
+    const t2 = performance.now();
 
     const solverUrl = process.env.SOLVER_SERVICE_URL ?? "http://solver_service:8000";
     const solverSecret = process.env.SOLVER_SERVICE_SECRET;
@@ -273,17 +488,57 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       return;
     }
 
+    const t3 = performance.now();
+
     if (!json?.ok) {
-      // Important: return HTTP 200 so the browser does not treat this as a network failure.
       res.status(200).json(json);
       return;
     }
 
+    json.timingMs = {
+      dbQueries: Math.round(t1 - t0),
+      dataTransform: Math.round(t2 - t1),
+      solverRoundTrip: Math.round(t3 - t2),
+      total: Math.round(t3 - t0),
+    };
+
     if (isReplan && replanBoundary) {
       const boundaryStr = replanBoundary.toISOString().slice(0, 10);
-      json.assignments = (json.assignments ?? []).filter(
-        (a: any) => a.day_date >= boundaryStr
-      );
+      const solverAssignments: any[] = json.assignments ?? [];
+
+      const existingByEmpDay = new Map<string, { machine_id: string; time_slot_id: string | null }>();
+      for (const a of existingAssignments as any[]) {
+        const dayDate = a.dayDate.toISOString().slice(0, 10);
+        if (dayDate < boundaryStr) continue;
+        existingByEmpDay.set(`${a.employeeId}|${dayDate}`, {
+          machine_id: a.machineId,
+          time_slot_id: a.timeSlotId ?? null,
+        });
+      }
+
+      const affectedDaySet = affectedDays;
+      json.assignments = solverAssignments.filter((a: any) => {
+        if (a.day_date < boundaryStr) return false;
+        return affectedDaySet.has(a.day_date);
+      });
+
+      const changesCount = json.assignments.filter((a: any) => {
+        const key = `${a.employee_id}|${a.day_date}`;
+        const existing = existingByEmpDay.get(key);
+        if (!existing) return true;
+        const proposedTs = a.time_slot_id ?? null;
+        return existing.machine_id !== a.machine_id || existing.time_slot_id !== proposedTs;
+      }).length;
+
+      json.replanDebug = {
+        directConflicts: [...affectedDays].length,
+        affectedDays: [...affectedDays].sort(),
+        freedPairsCount: freedPairs.size,
+        referencesSent: referenceAssignmentRows.length,
+        solverReturnedTotal: solverAssignments.length,
+        assignmentsForAffectedDays: json.assignments.length,
+        actualChanges: changesCount,
+      };
     }
 
     res.status(200).json(json);

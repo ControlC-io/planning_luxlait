@@ -26,6 +26,8 @@ type TimeSlot = { id: string; name: string; short_name: string | null; color: st
 type MachineOpenShift = { id: string; machine_id: string; time_slot_id: string };
 type MachineDowntime = { id: string; machine_id: string; day_date: string; reason: string | null };
 type DowntimeEntry = { day_date: string; reason: string };
+type StaffingRequirement = { id: string; machine_id: string; time_slot_id: string; min_employees: number };
+type StaffingEntry = { time_slot_id: string; min_employees: number };
 
 function authHeaders(): Record<string, string> {
   const token = localStorage.getItem("myrtest_jwt_token");
@@ -50,25 +52,31 @@ export default function MachinesAdmin() {
   const [timeSlots, setTimeSlots] = useState<TimeSlot[]>([]);
   const [machineOpenShifts, setMachineOpenShifts] = useState<MachineOpenShift[]>([]);
   const [machineDowntimes, setMachineDowntimes] = useState<MachineDowntime[]>([]);
+  const [staffingRequirements, setStaffingRequirements] = useState<StaffingRequirement[]>([]);
 
   const [importance, setImportance] = useState<MachineImportance>("OPTIONAL");
   const [selectedOpenShiftIds, setSelectedOpenShiftIds] = useState<string[]>([]);
   const [downtimeEntries, setDowntimeEntries] = useState<DowntimeEntry[]>([]);
   const [newDowntimeDate, setNewDowntimeDate] = useState<string>("");
   const [newDowntimeReason, setNewDowntimeReason] = useState<string>("");
+  const [staffingEntries, setStaffingEntries] = useState<StaffingEntry[]>([]);
+  const [newStaffingSlotId, setNewStaffingSlotId] = useState<string>("");
+  const [newStaffingMin, setNewStaffingMin] = useState<number>(1);
 
   const fetchData = async () => {
-    const [machinesRes, timeSlotsRes, openShiftsRes, downtimesRes] = await Promise.all([
+    const [machinesRes, timeSlotsRes, openShiftsRes, downtimesRes, staffingRes] = await Promise.all([
       supabase.from("luxlait_machines" as any).select("*").order("sort_order"),
       supabase.from("luxlait_time_slots" as any).select("*").order("sort_order"),
       supabase.from("luxlait_machine_open_shifts" as any).select("*"),
       supabase.from("luxlait_machine_downtimes" as any).select("*"),
+      fetch("/api/planning/luxlait_machine_staffing_requirements", { headers: authHeaders() }).then((r) => r.json()).catch(() => []),
     ]);
 
     setMachines((machinesRes.data as any) ?? []);
     setTimeSlots((timeSlotsRes.data as any) ?? []);
     setMachineOpenShifts((openShiftsRes.data as any) ?? []);
     setMachineDowntimes((downtimesRes.data as any) ?? []);
+    setStaffingRequirements(Array.isArray(staffingRes) ? staffingRes : []);
   };
   useEffect(() => { fetchData(); }, []);
 
@@ -85,6 +93,9 @@ export default function MachinesAdmin() {
     setDowntimeEntries([]);
     setNewDowntimeDate("");
     setNewDowntimeReason("");
+    setStaffingEntries([]);
+    setNewStaffingSlotId("");
+    setNewStaffingMin(1);
     setOpen(true);
   };
 
@@ -102,8 +113,15 @@ export default function MachinesAdmin() {
     setImportance(((m.importance ?? "OPTIONAL") as MachineImportance) || "OPTIONAL");
     setSelectedOpenShiftIds(osForMachine.map((os) => os.time_slot_id));
     setDowntimeEntries(dtForMachine.map((dt) => ({ day_date: dt.day_date, reason: dt.reason ?? "" })));
+    setStaffingEntries(
+      staffingRequirements
+        .filter((row) => row.machine_id === m.id)
+        .map((row) => ({ time_slot_id: row.time_slot_id, min_employees: row.min_employees }))
+    );
     setNewDowntimeDate("");
     setNewDowntimeReason("");
+    setNewStaffingSlotId(timeSlots[0]?.id ?? "");
+    setNewStaffingMin(1);
     setOpen(true);
   };
 
@@ -184,6 +202,27 @@ export default function MachinesAdmin() {
         if (!dtRes.ok) throw new Error(`Failed to save downtimes: ${dtRes.status}`);
       }
 
+      const uniqueStaffingEntries = Array.from(
+        new Map(
+          staffingEntries.map((e) => [e.time_slot_id, { ...e, min_employees: Math.max(0, Number(e.min_employees) || 0) }])
+        ).values()
+      ).filter((e) => e.time_slot_id);
+
+      if (uniqueStaffingEntries.length > 0) {
+        const staffingRes = await window.fetch("/api/planning/luxlait_machine_staffing_requirements/bulk_sync", {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({
+            rows: uniqueStaffingEntries.map((e) => ({
+              machine_id: resolvedMachineId,
+              time_slot_id: e.time_slot_id,
+              min_employees: e.min_employees,
+            })),
+          }),
+        });
+        if (!staffingRes.ok) throw new Error(`Failed to save minimum staffing requirements: ${staffingRes.status}`);
+      }
+
       setOpen(false);
       fetchData();
       toast({ title: "Saved", description: "Machine updated successfully." });
@@ -234,7 +273,7 @@ export default function MachinesAdmin() {
             <TableHead>Groupe</TableHead>
             <TableHead>Description</TableHead>
             <TableHead>Importance</TableHead>
-            <TableHead>Max employés</TableHead>
+            <TableHead>Min staffing rules</TableHead>
             <TableHead>Ordre</TableHead>
             <TableHead className="w-[100px]">Actions</TableHead>
           </TableRow>
@@ -259,7 +298,7 @@ export default function MachinesAdmin() {
                   );
                 })()}
               </TableCell>
-              <TableCell>{m.max_employees ?? 1}</TableCell>
+              <TableCell>{staffingRequirements.filter((row) => row.machine_id === m.id).length}</TableCell>
               <TableCell>{m.sort_order}</TableCell>
               <TableCell>
                 <div className="flex gap-1">
@@ -393,14 +432,38 @@ export default function MachinesAdmin() {
             </div>
 
             <div className="space-y-2">
-              <div className="text-sm font-medium">Max employees</div>
-              <Input
-                type="number"
-                placeholder="Max employees"
-                value={maxEmployees}
-                onChange={(e) => setMaxEmployees(Math.max(1, Number(e.target.value)))}
-                min={1}
-              />
+              <div className="text-sm font-medium">Minimum staffing by shift for all days</div>
+              <div className="flex items-end gap-2">
+                <Select value={newStaffingSlotId} onValueChange={setNewStaffingSlotId}>
+                  <SelectTrigger className="h-9">
+                    <SelectValue placeholder="Shift" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {timeSlots.map((ts) => (
+                      <SelectItem key={ts.id} value={ts.id}>{ts.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Input type="number" min={0} value={newStaffingMin} onChange={(e) => setNewStaffingMin(Math.max(0, Number(e.target.value) || 0))} className="h-9 w-24" />
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    if (!newStaffingSlotId) return;
+                    setStaffingEntries((prev) => [...prev, { time_slot_id: newStaffingSlotId, min_employees: newStaffingMin }]);
+                  }}
+                >
+                  Add
+                </Button>
+              </div>
+              <div className="space-y-1 max-h-36 overflow-y-auto">
+                {staffingEntries.map((entry, idx) => (
+                  <div key={`${entry.time_slot_id}_${idx}`} className="flex items-center justify-between border rounded px-2 py-1 text-xs">
+                    <span>{timeSlots.find((t) => t.id === entry.time_slot_id)?.name ?? entry.time_slot_id} | min {entry.min_employees}</span>
+                    <Button type="button" variant="ghost" size="sm" onClick={() => setStaffingEntries((prev) => prev.filter((_, i) => i !== idx))}>Remove</Button>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
           <DialogFooter>

@@ -128,6 +128,7 @@ async function seedPlanning() {
   await prisma.luxlaitDailyAssignment.deleteMany();
   await prisma.luxlaitWeeklyAssignment.deleteMany();
   await prisma.luxlaitMachineDowntime.deleteMany();
+  await prisma.luxlaitMachineClosedWeekday.deleteMany();
   await prisma.luxlaitMachineOpenShift.deleteMany();
   await prisma.luxlaitEmployeeMachineSkill.deleteMany();
   await prisma.luxlaitWeeklyEmployeeStatus.deleteMany();

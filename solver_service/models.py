@@ -37,6 +37,26 @@ class UnavailableDayInput(BaseModel):
     status_id: Optional[str] = None
 
 
+class UnavailableShiftInput(BaseModel):
+    employee_id: str
+    day_date: str
+    time_slot_id: str
+    status_id: Optional[str] = None
+
+
+class MachineClosedShiftInput(BaseModel):
+    machine_id: str
+    day_date: str
+    time_slot_id: str
+
+
+class MachineShiftMinRequirementInput(BaseModel):
+    machine_id: str
+    day_date: str
+    time_slot_id: str
+    min_employees: int = Field(default=0, ge=0)
+
+
 class ExistingAssignmentInput(BaseModel):
     day_date: str  # YYYY-MM-DD
     employee_id: str
@@ -52,6 +72,7 @@ class ConstraintsInput(BaseModel):
 
     # Solver behavior
     solve_time_limit_seconds: int = Field(default=30, ge=1, le=3600)
+    relative_gap_limit: float = Field(default=0.02, ge=0.0, le=1.0)
 
     # If true, the solver must choose exactly one time slot whenever a
     # machine assignment is made for an employee and day.
@@ -69,6 +90,9 @@ class SolveRequest(BaseModel):
 
     # Each entry means the employee is unavailable on that day
     unavailable_days: List[UnavailableDayInput] = []
+    unavailable_shifts: List[UnavailableShiftInput] = []
+    machine_closed_shifts: List[MachineClosedShiftInput] = []
+    machine_shift_min_requirements: List[MachineShiftMinRequirementInput] = []
 
     # Optional lock-in for already confirmed days
     existing_assignments: List[ExistingAssignmentInput] = []

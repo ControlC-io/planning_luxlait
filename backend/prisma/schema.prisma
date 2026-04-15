@@ -187,6 +187,7 @@ model LuxlaitEmployee {
   skills                 LuxlaitEmployeeMachineSkill[]
   dailyAssignments       LuxlaitDailyAssignment[]
   weeklyEmployeeStatuses LuxlaitWeeklyEmployeeStatus[]
+  weeklyEmployeeShiftStatuses LuxlaitWeeklyEmployeeShiftStatus[]
   weeklyAssignments      LuxlaitWeeklyAssignment[]
 
   @@map("luxlait_employees")
@@ -207,9 +208,25 @@ model LuxlaitMachine {
   openShifts        LuxlaitMachineOpenShift[]
   dailyAssignments  LuxlaitDailyAssignment[]
   downtimes         LuxlaitMachineDowntime[]
+  closedWeekdays    LuxlaitMachineClosedWeekday[]
+  downtimeShifts    LuxlaitMachineDowntimeShift[]
+  closedWeekdayShifts LuxlaitMachineClosedWeekdayShift[]
+  staffingRequirements LuxlaitMachineStaffingRequirement[]
   weeklyAssignments LuxlaitWeeklyAssignment[]
 
   @@map("luxlait_machines")
+}
+
+model LuxlaitMachineClosedWeekday {
+  id        String   @id @default(uuid()) @db.Uuid
+  machineId String   @map("machine_id") @db.Uuid
+  weekday   Int
+  createdAt DateTime @default(now()) @map("created_at")
+
+  machine LuxlaitMachine @relation(fields: [machineId], references: [id], onDelete: Cascade)
+
+  @@unique([machineId, weekday])
+  @@map("luxlait_machine_closed_weekdays")
 }
 
 model LuxlaitTimeSlot {
@@ -222,6 +239,10 @@ model LuxlaitTimeSlot {
 
   dailyAssignments LuxlaitDailyAssignment[]
   machineOpenShifts LuxlaitMachineOpenShift[]
+  weeklyEmployeeShiftStatuses LuxlaitWeeklyEmployeeShiftStatus[]
+  machineDowntimeShifts LuxlaitMachineDowntimeShift[]
+  machineClosedWeekdayShifts LuxlaitMachineClosedWeekdayShift[]
+  machineStaffingRequirements LuxlaitMachineStaffingRequirement[]
 
   @@map("luxlait_time_slots")
 }
@@ -259,8 +280,69 @@ model LuxlaitStatus {
   createdAt DateTime @default(now()) @map("created_at")
 
   weeklyEmployeeStatuses LuxlaitWeeklyEmployeeStatus[]
+  weeklyEmployeeShiftStatuses LuxlaitWeeklyEmployeeShiftStatus[]
 
   @@map("luxlait_statuses")
+}
+
+model LuxlaitWeeklyEmployeeShiftStatus {
+  id         String   @id @default(uuid()) @db.Uuid
+  employeeId String   @map("employee_id") @db.Uuid
+  statusId   String   @map("status_id") @db.Uuid
+  dayDate    DateTime @db.Date @map("day_date")
+  timeSlotId String   @map("time_slot_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  employee LuxlaitEmployee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  status   LuxlaitStatus   @relation(fields: [statusId], references: [id], onDelete: Cascade)
+  timeSlot LuxlaitTimeSlot @relation(fields: [timeSlotId], references: [id], onDelete: Cascade)
+
+  @@unique([dayDate, employeeId, timeSlotId])
+  @@map("luxlait_weekly_employee_shift_statuses")
+}
+
+model LuxlaitMachineDowntimeShift {
+  id         String   @id @default(uuid()) @db.Uuid
+  machineId  String   @map("machine_id") @db.Uuid
+  dayDate    DateTime @db.Date @map("day_date")
+  timeSlotId String   @map("time_slot_id") @db.Uuid
+  reason     String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  machine  LuxlaitMachine  @relation(fields: [machineId], references: [id], onDelete: Cascade)
+  timeSlot LuxlaitTimeSlot @relation(fields: [timeSlotId], references: [id], onDelete: Cascade)
+
+  @@unique([machineId, dayDate, timeSlotId])
+  @@map("luxlait_machine_downtime_shifts")
+}
+
+model LuxlaitMachineClosedWeekdayShift {
+  id         String   @id @default(uuid()) @db.Uuid
+  machineId  String   @map("machine_id") @db.Uuid
+  weekday    Int
+  timeSlotId String   @map("time_slot_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  machine  LuxlaitMachine  @relation(fields: [machineId], references: [id], onDelete: Cascade)
+  timeSlot LuxlaitTimeSlot @relation(fields: [timeSlotId], references: [id], onDelete: Cascade)
+
+  @@unique([machineId, weekday, timeSlotId])
+  @@map("luxlait_machine_closed_weekday_shifts")
+}
+
+model LuxlaitMachineStaffingRequirement {
+  id           String   @id @default(uuid()) @db.Uuid
+  machineId    String   @map("machine_id") @db.Uuid
+  dayDate      DateTime @db.Date @map("day_date")
+  timeSlotId   String   @map("time_slot_id") @db.Uuid
+  minEmployees Int      @default(0) @map("min_employees")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  machine  LuxlaitMachine  @relation(fields: [machineId], references: [id], onDelete: Cascade)
+  timeSlot LuxlaitTimeSlot @relation(fields: [timeSlotId], references: [id], onDelete: Cascade)
+
+  @@unique([machineId, dayDate, timeSlotId])
+  @@map("luxlait_machine_staffing_requirements")
 }
 
 // Link Better Auth User -> planning profile (optional)

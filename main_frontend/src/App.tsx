@@ -13,6 +13,7 @@ import StatusesAdmin from "./pages/admin/StatusesAdmin";
 import TimeSlotsAdmin from "./pages/admin/TimeSlotsAdmin";
 import SkillsMatrixAdmin from "./pages/admin/SkillsMatrixAdmin";
 import EmployeeDayOffsAdmin from "./pages/admin/EmployeeDayOffsAdmin";
+import MachineWeeklyClosuresAdmin from "./pages/admin/MachineWeeklyClosuresAdmin";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -48,6 +49,7 @@ const AppRoutes = () => (
       <Route path="/admin/skills" element={<AdminRoute><SkillsMatrixAdmin /></AdminRoute>} />
       <Route path="/admin/timeslots" element={<AdminRoute><TimeSlotsAdmin /></AdminRoute>} />
       <Route path="/admin/employee-day-offs" element={<AdminRoute><EmployeeDayOffsAdmin /></AdminRoute>} />
+      <Route path="/admin/machine-weekly-closures" element={<AdminRoute><MachineWeeklyClosuresAdmin /></AdminRoute>} />
     </Route>
     <Route path="*" element={<NotFound />} />
   </Routes>

@@ -211,6 +211,21 @@ class FromQueryBuilder {
 
       // DELETE (Planning UI deletes by id only)
       if (this.operation === "delete") {
+        if (this.table === "luxlait_employee_machine_skills") {
+          const employeeId = filterEq("employee_id");
+          const machineId = filterEq("machine_id");
+          const res = await fetch(`/api/planning/${this.table}`, {
+            method: "DELETE",
+            headers: { ...headers, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              employee_id: employeeId,
+              machine_id: machineId,
+            }),
+          });
+          const json = await jsonOrThrow(res);
+          if (!res.ok) return { data: null, error: { message: (json as any)?.error ?? "Delete failed" } };
+          return { data: null, error: null };
+        }
         const id = filterEq("id");
         const endpoint = `/api/planning/${this.table}/${String(id)}`;
         const res = await fetch(endpoint, { method: "DELETE", headers });

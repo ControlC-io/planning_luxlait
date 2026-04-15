@@ -12,6 +12,7 @@ const navItems = [
   { to: "/admin/statuses", label: "Statuts", icon: Palette, admin: true },
   { to: "/admin/timeslots", label: "Créneaux", icon: Clock, admin: true },
   { to: "/admin/employee-day-offs", label: "Congés", icon: CalendarOff, admin: true },
+  { to: "/admin/machine-weekly-closures", label: "Fermetures machines", icon: CalendarOff, admin: true },
 ];
 
 export default function AppLayout() {
