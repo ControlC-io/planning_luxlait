@@ -381,6 +381,56 @@ After starting the stack, you can quickly confirm that everything is wired corre
 5. **2FA Email (optional):** If `SENDGRID_API_KEY` and `EMAIL_SERVICE_SECRET` are configured, enable email 2FA for a user and verify you receive OTP codes and can complete login via the email challenge page.
 6. **API docs:** Visit `http://localhost/api/docs` to inspect and try the documented endpoints (auth, counter, admin, roles).
 
+### Smoke Test 4: Local Docker Template Availability
+
+This step validates that the Docker Compose template starts cleanly and the NGINX reverse proxy correctly forwards health traffic to the backend.
+
+**Prerequisites**
+
+* Docker and Docker Compose are installed and the daemon is running.
+* The `.env` file exists at the project root. If it does not, copy the example first:
+
+  ```bash
+  cp .env.example .env
+  ```
+
+* If this is the very first run, complete the initialization steps from **Quick Start** above (schema push and seed) before running the health check below.
+
+**Start the stack**
+
+From the project root:
+
+```bash
+docker-compose up --build -d
+```
+
+Wait approximately 30 seconds for all containers to reach a ready state.
+
+**Verify containers are running**
+
+```bash
+docker ps --format "table {{.Names}}\t{{.Status}}"
+```
+
+Expected: all six services (`reverse_proxy`, `main_frontend_app`, `admin_frontend_app`, `backend_api`, `email_service`, `database`) appear with a status of `Up`.
+
+**Check service health via the proxy**
+
+```bash
+curl -s http://localhost/api/health
+```
+
+Expected response shape:
+
+```json
+{
+  "status": "ok",
+  "database": { "ok": true }
+}
+```
+
+The smoke test passes when `status` is `"ok"` and `database.ok` is `true`. Any other values indicate a configuration or startup problem; consult `docker-compose logs` to diagnose.
+
 ### Docker Container Management
 
 **View Running Containers:**
