@@ -121,9 +121,16 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
             machine_shift_min_requirements[(row.machine_id, r_day, row.time_slot_id)] = int(row.min_employees)
 
         qualified_for_machine: Dict[str, Set[str]] = {m_id: set() for m_id in machine_ids}
+        autonomous_for_machine: Dict[str, Set[str]] = {m_id: set() for m_id in machine_ids}
+        in_training_for_machine: Dict[str, Set[str]] = {m_id: set() for m_id in machine_ids}
         for sk in req.skills:
-            if sk.machine_id in qualified_for_machine:
-                qualified_for_machine[sk.machine_id].add(sk.employee_id)
+            if sk.machine_id not in qualified_for_machine:
+                continue
+            qualified_for_machine[sk.machine_id].add(sk.employee_id)
+            if sk.level == 'IN_TRAINING':
+                in_training_for_machine[sk.machine_id].add(sk.employee_id)
+            else:
+                autonomous_for_machine[sk.machine_id].add(sk.employee_id)
 
         # ── Handle existing (locked-in) assignments ──────────────────────────
         # Locked-in pairs are excluded from the solver entirely. Their capacity
@@ -367,6 +374,70 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                         remaining = max(0, base_max - locked_on_shift)
                         model.add(sum(cap_overlaps) <= remaining)
 
+        # ── "In training never solo" constraint ─────────────────────────────
+        # An employee with skill level IN_TRAINING must never be the only
+        # operator on a given machine + day + shift. There must be at least one
+        # AUTONOMOUS coworker (locked or solver assigned) on the same shift.
+        for m_id in machine_ids:
+            in_training_set = in_training_for_machine.get(m_id, set())
+            if not in_training_set:
+                continue
+            autonomous_set = autonomous_for_machine.get(m_id, set())
+            downtime_set = machine_downtime_by_machine_id.get(m_id, set())
+
+            for d in days:
+                if d in downtime_set:
+                    continue
+
+                for ts_id in working_time_slot_ids:
+                    if (m_id, d, ts_id) in machine_closed_shift:
+                        continue
+
+                    in_training_overlaps: List[cp_model.IntVar] = []
+                    for e_id in in_training_set:
+                        if (e_id, d) in locked_emp_days:
+                            continue
+                        if (e_id, d) in unavailable:
+                            continue
+                        if (e_id, d, m_id) not in x or (e_id, d, ts_id) not in t:
+                            continue
+                        if (e_id, d, ts_id) in unavailable_shift:
+                            continue
+                        in_training_overlaps.append(get_overlap(e_id, d, m_id, ts_id))
+
+                    if not in_training_overlaps:
+                        continue
+
+                    autonomous_overlaps: List[cp_model.IntVar] = []
+                    for e_id in autonomous_set:
+                        if (e_id, d) in locked_emp_days:
+                            continue
+                        if (e_id, d) in unavailable:
+                            continue
+                        if (e_id, d, m_id) not in x or (e_id, d, ts_id) not in t:
+                            continue
+                        if (e_id, d, ts_id) in unavailable_shift:
+                            continue
+                        autonomous_overlaps.append(get_overlap(e_id, d, m_id, ts_id))
+
+                    locked_autonomous_count = 0
+                    for (e_id, ld), a in locked.items():
+                        if ld != d or a.machine_id != m_id or a.time_slot_id != ts_id:
+                            continue
+                        if e_id in autonomous_set:
+                            locked_autonomous_count += 1
+
+                    if not autonomous_overlaps and locked_autonomous_count == 0:
+                        # No possible AUTONOMOUS partner on this shift → forbid
+                        # any IN_TRAINING assignment on it.
+                        for ov_f in in_training_overlaps:
+                            model.add(ov_f == 0)
+                        continue
+
+                    autonomous_sum = sum(autonomous_overlaps) + locked_autonomous_count
+                    for ov_f in in_training_overlaps:
+                        model.add(ov_f <= autonomous_sum)
+
         # Enforce minimum staffing by machine/day/shift.
         for (m_id, d, ts_id), required_count in machine_shift_min_requirements.items():
             if required_count <= 0:
@@ -533,15 +604,155 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
         fairness_weight = req.constraints.fairness_weight
         priority_weight = req.constraints.priority_machine_weight
         stability_weight = req.constraints.stability_weight
+        training_weight = req.constraints.training_bonus_weight
+        polyvalent_a_weight = req.constraints.polyvalent_in_autonomous_bonus_weight
+        polyvalent_f_weight = req.constraints.polyvalent_in_training_bonus_weight
+        extra_coverage_weight = req.constraints.extra_coverage_penalty_weight
 
         priority_shift_covered_sum = (
             sum(priority_shift_covered_vars) if priority_shift_covered_vars else 0
         )
         stability_bonus = sum(stability_keep_vars) if stability_keep_vars else 0
+
+        # Categorize employees by skill profile.
+        employees_with_autonomous_skill: Set[str] = set()
+        for emp_set in autonomous_for_machine.values():
+            employees_with_autonomous_skill.update(emp_set)
+        employees_with_in_training_skill: Set[str] = set()
+        for emp_set in in_training_for_machine.values():
+            employees_with_in_training_skill.update(emp_set)
+
+        # F-only: every skill is IN_TRAINING. They have nothing else to do.
+        in_training_only_employees: Set[str] = (
+            employees_with_in_training_skill - employees_with_autonomous_skill
+        )
+        # F-partial: have both A and F skills. They are polyvalent.
+        polyvalent_employees: Set[str] = (
+            employees_with_in_training_skill & employees_with_autonomous_skill
+        )
+
+        # Per-employee, per-day map of their A and F qualified machines (so we
+        # can build work_a and work_f indicator variables for polyvalents).
+        autonomous_machines_for_employee: Dict[str, List[str]] = {
+            e_id: [m_id for m_id in machine_ids if e_id in autonomous_for_machine.get(m_id, set())]
+            for e_id in polyvalent_employees
+        }
+        in_training_machines_for_employee: Dict[str, List[str]] = {
+            e_id: [m_id for m_id in machine_ids if e_id in in_training_for_machine.get(m_id, set())]
+            for e_id in polyvalent_employees
+        }
+
+        # Bonus 1: F-only employees scheduled (any machine, any day).
+        training_bonus_lits: List[cp_model.IntVar] = []
+        for (e_id, d), assigned_var in assigned_any.items():
+            if e_id in in_training_only_employees:
+                training_bonus_lits.append(assigned_var)
+        training_bonus = sum(training_bonus_lits) if training_bonus_lits else 0
+
+        # Bonus 2 & 3: polyvalent employees scheduled, split by skill level
+        # of the assigned machine. Bonus on autonomous > bonus on training so
+        # the solver prefers placing them on productive work; but the F bonus
+        # is non zero so they still go to training if no A slot is available.
+        polyvalent_a_bonus_lits: List[cp_model.IntVar] = []
+        polyvalent_f_bonus_lits: List[cp_model.IntVar] = []
+        for e_id in polyvalent_employees:
+            for d in days:
+                if (e_id, d) not in assigned_any:
+                    continue
+
+                a_overlaps_today = [
+                    x[(e_id, d, m_id)]
+                    for m_id in autonomous_machines_for_employee.get(e_id, [])
+                    if (e_id, d, m_id) in x
+                ]
+                if a_overlaps_today:
+                    work_a = model.new_bool_var(
+                        f"work_a_e{e_id}_d{d.isoformat()}"
+                    )
+                    # An employee can be assigned to at most one machine per
+                    # day (assigned_any is binary), so the sum is 0 or 1.
+                    model.add(sum(a_overlaps_today) == work_a)
+                    polyvalent_a_bonus_lits.append(work_a)
+
+                f_overlaps_today = [
+                    x[(e_id, d, m_id)]
+                    for m_id in in_training_machines_for_employee.get(e_id, [])
+                    if (e_id, d, m_id) in x
+                ]
+                if f_overlaps_today:
+                    work_f = model.new_bool_var(
+                        f"work_f_e{e_id}_d{d.isoformat()}"
+                    )
+                    model.add(sum(f_overlaps_today) == work_f)
+                    polyvalent_f_bonus_lits.append(work_f)
+        polyvalent_a_bonus = (
+            sum(polyvalent_a_bonus_lits) if polyvalent_a_bonus_lits else 0
+        )
+        polyvalent_f_bonus = (
+            sum(polyvalent_f_bonus_lits) if polyvalent_f_bonus_lits else 0
+        )
+
+        # Penalize any coverage above the minimum required per (machine, day,
+        # time slot). Saving manpower on shifts that already meet the min
+        # avoids unnecessary cost (A+A doublons or A+F doublons when the F
+        # bonus is not high enough to justify the extra body).
+        extra_coverage_vars: List[cp_model.IntVar] = []
+        for m_id in machine_ids:
+            open_slots = machine_open_time_slots_by_machine_id.get(m_id, set())
+            if not open_slots:
+                continue
+            downtime_set = machine_downtime_by_machine_id.get(m_id, set())
+            qualified = qualified_for_machine.get(m_id, set())
+
+            for d in days:
+                if d in downtime_set:
+                    continue
+                for ts_id in open_slots:
+                    if (m_id, d, ts_id) in machine_closed_shift:
+                        continue
+
+                    shift_overlaps: List[cp_model.IntVar] = []
+                    for e_id in qualified:
+                        if (e_id, d) in locked_emp_days:
+                            continue
+                        if (e_id, d) in unavailable:
+                            continue
+                        if (e_id, d, m_id) not in x or (e_id, d, ts_id) not in t:
+                            continue
+                        if (e_id, d, ts_id) in unavailable_shift:
+                            continue
+                        shift_overlaps.append(get_overlap(e_id, d, m_id, ts_id))
+
+                    if not shift_overlaps:
+                        continue
+
+                    locked_count = locked_shift_coverage.get((m_id, d, ts_id), 0)
+                    min_req = machine_shift_min_requirements.get((m_id, d, ts_id), 0)
+                    upper_bound = len(shift_overlaps) + locked_count
+                    if upper_bound <= min_req:
+                        continue
+
+                    extra_var = model.new_int_var(
+                        0,
+                        upper_bound,
+                        f"extra_m{m_id}_d{d.isoformat()}_ts{ts_id}",
+                    )
+                    model.add(
+                        extra_var >= sum(shift_overlaps) + locked_count - min_req
+                    )
+                    extra_coverage_vars.append(extra_var)
+        extra_coverage_total = (
+            sum(extra_coverage_vars) if extra_coverage_vars else 0
+        )
+
         objective = (
             fairness_weight * fairness_cost
             - priority_weight * priority_shift_covered_sum
             - stability_weight * stability_bonus
+            - training_weight * training_bonus
+            - polyvalent_a_weight * polyvalent_a_bonus
+            - polyvalent_f_weight * polyvalent_f_bonus
+            + extra_coverage_weight * extra_coverage_total
         )
         model.minimize(objective)
 

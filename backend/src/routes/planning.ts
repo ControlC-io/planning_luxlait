@@ -68,6 +68,7 @@ function mapSkill(sk: any) {
     id: sk.id,
     employee_id: sk.employeeId,
     machine_id: sk.machineId,
+    level: sk.level,
   };
 }
 
@@ -387,7 +388,15 @@ router.get('/luxlait_weekly_employee_shift_statuses', async (req: Request, res: 
 // Mutations (used by Planning.tsx)
 // -----------------------------------------------------------------------------
 
-/** Test only: removes all planning data for an inclusive date range (assignments, statuses, machine day rows). */
+/**
+ * Wipes the planning for an inclusive date range (assignments, employee
+ * statuses, dated staffing requirements, machine downtimes) and then
+ * restores the baseline leaves and machine downtimes from the
+ * LuxlaitDefaultLeave / LuxlaitDefaultMachineDowntime catalogues (loaded
+ * from the source Excel file).
+ *
+ * Global staffing requirements (dayDate = 1970-01-01) are not touched.
+ */
 router.post('/clear_month_planning_test', async (req: Request, res: Response) => {
   try {
     if (!isAdminOrManager(req.userRoles)) {
@@ -412,31 +421,70 @@ router.post('/clear_month_planning_test', async (req: Request, res: Response) =>
 
     const range = { gte: fromD, lte: toD };
 
-    const [
-      dailyAssignments,
-      weeklyStatuses,
-      weeklyShiftStatuses,
-      machineDowntimes,
-      machineDowntimeShifts,
-      staffingRequirements,
-    ] = await prisma.$transaction([
-      prisma.luxlaitDailyAssignment.deleteMany({ where: { dayDate: range } }),
-      prisma.luxlaitWeeklyEmployeeStatus.deleteMany({ where: { dayDate: range } }),
-      prisma.luxlaitWeeklyEmployeeShiftStatus.deleteMany({ where: { dayDate: range } }),
-      prisma.luxlaitMachineDowntime.deleteMany({ where: { dayDate: range } }),
-      prisma.luxlaitMachineDowntimeShift.deleteMany({ where: { dayDate: range } }),
-      prisma.luxlaitMachineStaffingRequirement.deleteMany({ where: { dayDate: range } }),
-    ]);
+    const result = await prisma.$transaction(async (tx) => {
+      const dailyAssignments = await tx.luxlaitDailyAssignment.deleteMany({ where: { dayDate: range } });
+      const weeklyStatuses = await tx.luxlaitWeeklyEmployeeStatus.deleteMany({ where: { dayDate: range } });
+      const weeklyShiftStatuses = await tx.luxlaitWeeklyEmployeeShiftStatus.deleteMany({ where: { dayDate: range } });
+      const staffingRequirements = await tx.luxlaitMachineStaffingRequirement.deleteMany({ where: { dayDate: range } });
+      const machineDowntimeShifts = await tx.luxlaitMachineDowntimeShift.deleteMany({ where: { dayDate: range } });
+      const machineDowntimes = await tx.luxlaitMachineDowntime.deleteMany({ where: { dayDate: range } });
+
+      // Restore default leaves from the catalogue for the cleared range.
+      const defaultLeaves = await tx.luxlaitDefaultLeave.findMany({ where: { dayDate: range } });
+      let restoredLeaves = 0;
+      if (defaultLeaves.length > 0) {
+        const created = await tx.luxlaitWeeklyEmployeeStatus.createMany({
+          data: defaultLeaves.map((dl) => ({
+            id: randomUUID(),
+            employeeId: dl.employeeId,
+            statusId: dl.statusId,
+            dayDate: dl.dayDate,
+          })),
+          skipDuplicates: true,
+        });
+        restoredLeaves = created.count;
+      }
+
+      // Restore default machine downtimes from the catalogue for the cleared range.
+      const defaultDowntimes = await tx.luxlaitDefaultMachineDowntime.findMany({ where: { dayDate: range } });
+      let restoredDowntimes = 0;
+      if (defaultDowntimes.length > 0) {
+        const created = await tx.luxlaitMachineDowntime.createMany({
+          data: defaultDowntimes.map((dd) => ({
+            id: randomUUID(),
+            machineId: dd.machineId,
+            dayDate: dd.dayDate,
+          })),
+          skipDuplicates: true,
+        });
+        restoredDowntimes = created.count;
+      }
+
+      return {
+        dailyAssignments,
+        weeklyStatuses,
+        weeklyShiftStatuses,
+        staffingRequirements,
+        machineDowntimeShifts,
+        machineDowntimes,
+        restoredLeaves,
+        restoredDowntimes,
+      };
+    });
 
     res.json({
       ok: true,
       deleted: {
-        daily_assignments: dailyAssignments.count,
-        weekly_employee_statuses: weeklyStatuses.count,
-        weekly_employee_shift_statuses: weeklyShiftStatuses.count,
-        machine_downtimes: machineDowntimes.count,
-        machine_downtime_shifts: machineDowntimeShifts.count,
-        machine_staffing_requirements: staffingRequirements.count,
+        daily_assignments: result.dailyAssignments.count,
+        weekly_employee_statuses: result.weeklyStatuses.count,
+        weekly_employee_shift_statuses: result.weeklyShiftStatuses.count,
+        machine_staffing_requirements: result.staffingRequirements.count,
+        machine_downtime_shifts: result.machineDowntimeShifts.count,
+        machine_downtimes: result.machineDowntimes.count,
+      },
+      restored: {
+        default_leaves: result.restoredLeaves,
+        default_machine_downtimes: result.restoredDowntimes,
       },
     });
   } catch (e) {

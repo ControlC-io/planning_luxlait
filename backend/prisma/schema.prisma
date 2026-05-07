@@ -176,6 +176,11 @@ enum MachineImportance {
   OPTIONAL
 }
 
+enum SkillLevel {
+  AUTONOMOUS
+  IN_TRAINING
+}
+
 model LuxlaitEmployee {
   id              String   @id @default(uuid()) @db.Uuid
   firstName      String   @map("first_name")
@@ -359,9 +364,10 @@ model LuxlaitProfile {
 }
 
 model LuxlaitEmployeeMachineSkill {
-  id         String  @id @default(uuid()) @db.Uuid
-  employeeId String  @map("employee_id") @db.Uuid
-  machineId  String  @map("machine_id") @db.Uuid
+  id         String     @id @default(uuid()) @db.Uuid
+  employeeId String     @map("employee_id") @db.Uuid
+  machineId  String     @map("machine_id") @db.Uuid
+  level      SkillLevel @default(AUTONOMOUS)
 
   employee LuxlaitEmployee @relation(fields: [employeeId], references: [id])
   machine  LuxlaitMachine  @relation(fields: [machineId], references: [id])
@@ -412,4 +418,32 @@ model LuxlaitWeeklyEmployeeStatus {
 
   @@unique([dayDate, employeeId])
   @@map("luxlait_weekly_employee_statuses")
+}
+
+// Reference catalogue of official leaves (vacations, etc) loaded from the
+// monthly Excel file. Used as a baseline so the "Clear month" action can
+// restore the original leaves after wiping the planning.
+model LuxlaitDefaultLeave {
+  id         String   @id @default(uuid()) @db.Uuid
+  employeeId String   @map("employee_id") @db.Uuid
+  statusId   String   @map("status_id") @db.Uuid
+  dayDate    DateTime @db.Date @map("day_date")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@unique([dayDate, employeeId])
+  @@map("luxlait_default_leaves")
+}
+
+// Reference catalogue of official machine downtimes loaded from the monthly
+// Excel file (e.g. planned maintenance days). Used as a baseline so the
+// "Clear month" action can restore the original downtimes after wiping the
+// planning.
+model LuxlaitDefaultMachineDowntime {
+  id        String   @id @default(uuid()) @db.Uuid
+  machineId String   @map("machine_id") @db.Uuid
+  dayDate   DateTime @db.Date @map("day_date")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([dayDate, machineId])
+  @@map("luxlait_default_machine_downtimes")
 }

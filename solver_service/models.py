@@ -22,6 +22,10 @@ class MachineInput(BaseModel):
 class SkillInput(BaseModel):
     employee_id: str
     machine_id: str
+    # AUTONOMOUS = can work alone on the machine
+    # IN_TRAINING = must be paired with an autonomous coworker on the same
+    #               machine during the same shift (never solo)
+    level: Literal['AUTONOMOUS', 'IN_TRAINING'] = 'AUTONOMOUS'
 
 
 class TimeSlotInput(BaseModel):
@@ -69,6 +73,22 @@ class ConstraintsInput(BaseModel):
     fairness_weight: int = Field(default=1, ge=0)
     priority_machine_weight: int = Field(default=50, ge=0)
     stability_weight: int = Field(default=0, ge=0)
+    # Bonus per F-only employee scheduled (someone whose every skill is
+    # IN_TRAINING). They have nothing else to do, so we actively pair them
+    # with an autonomous coworker for training.
+    training_bonus_weight: int = Field(default=10, ge=0)
+    # Bonus per F-partial employee (has both A and F skills) scheduled to one
+    # of their AUTONOMOUS machines on a given day. Encourages productive work.
+    polyvalent_in_autonomous_bonus_weight: int = Field(default=7, ge=0)
+    # Bonus per F-partial employee scheduled to one of their IN_TRAINING
+    # machines on a given day. Strictly lower than the AUTONOMOUS bonus so
+    # the solver prefers placing them on productive work, but high enough to
+    # justify a training shift when no autonomous slot is available.
+    polyvalent_in_training_bonus_weight: int = Field(default=6, ge=0)
+    # Penalty per employee assigned beyond the minimum staffing requirement on
+    # a given (machine, day, shift). Discourages A+A doublons and unnecessary
+    # F doublons.
+    extra_coverage_penalty_weight: int = Field(default=5, ge=0)
 
     # Solver behavior
     solve_time_limit_seconds: int = Field(default=30, ge=1, le=3600)

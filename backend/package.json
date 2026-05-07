@@ -13,6 +13,7 @@
     "prisma:studio": "prisma studio",
     "seed": "ts-node src/scripts/seed.ts",
     "seed:planning": "ts-node src/scripts/seed-planning.ts",
+    "seed:luxlait": "ts-node src/scripts/seed-luxlait-real.ts",
     "test:auth": "ts-node src/scripts/test-auth.ts"
   },
   "dependencies": {

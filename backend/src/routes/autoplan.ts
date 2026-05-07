@@ -421,6 +421,7 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       skills: skills.map((sk) => ({
         employee_id: sk.employeeId,
         machine_id: sk.machineId,
+        level: sk.level,
       })),
       time_slots: timeSlots.map((ts) => ({
         id: ts.id,
