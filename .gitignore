@@ -17,9 +17,6 @@ build/
 .vite/
 */.vite/
 
-# Prisma
-backend/prisma/migrations/
-
 # Logs
 *.log
 npm-debug.log*
