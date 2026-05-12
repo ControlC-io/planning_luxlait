@@ -40,19 +40,19 @@ def _lower_or_empty(s: Optional[str]) -> str:
     return (s or "").strip().lower()
 
 
-def _matches_keyword(ts: TimeSlotInput, keyword: str) -> bool:
-    keyword_lower = keyword.lower()
-    fields = [ts.name, ts.short_name]
-    return any(keyword_lower in _lower_or_empty(f) for f in fields)
+# Number of slots that must elapse between two shifts of the same
+# employee. With 8h shifts, the next 2 slots after a worked one are
+# forbidden, which guarantees a 16h rest before the next shift.
+REST_GAP_SLOTS: int = 2
 
 
-def _infer_shift_sets(time_slots: Sequence[TimeSlotInput]) -> Tuple[List[str], List[str], List[str]]:
-    working_time_slots = [ts.id for ts in time_slots if "repos" not in _lower_or_empty(ts.name) and "repos" not in _lower_or_empty(ts.short_name)]
-
-    night_time_slots = [ts.id for ts in time_slots if _matches_keyword(ts, "nuit")]
-    morning_time_slots = [ts.id for ts in time_slots if _matches_keyword(ts, "matin")]
-
-    return working_time_slots, night_time_slots, morning_time_slots
+def _infer_working_time_slots(time_slots: Sequence[TimeSlotInput]) -> List[TimeSlotInput]:
+    return [
+        ts
+        for ts in time_slots
+        if "repos" not in _lower_or_empty(ts.name)
+        and "repos" not in _lower_or_empty(ts.short_name)
+    ]
 
 
 def solve_cp_sat(req: SolveRequest) -> SolveResponse:
@@ -70,15 +70,17 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
         if not employees or not machines or not days:
             return SolveResponse(ok=True, assignments=[], stats={"durationMs": int((time.time() - start) * 1000)})
 
-        working_time_slot_ids, night_time_slot_ids, morning_time_slot_ids = _infer_shift_sets(time_slots)
+        working_time_slots_ordered = sorted(
+            _infer_working_time_slots(time_slots), key=lambda ts: ts.sort_order
+        )
+        if not working_time_slots_ordered:
+            working_time_slots_ordered = sorted(
+                list(time_slots), key=lambda ts: ts.sort_order
+            )
 
-        if not working_time_slot_ids:
-            working_time_slot_ids = [ts.id for ts in time_slots]
-
+        working_time_slot_ids = [ts.id for ts in working_time_slots_ordered]
         working_time_slot_set = set(working_time_slot_ids)
-        night_time_slot_ids_set = set(night_time_slot_ids)
-        morning_time_slot_ids_set = set(morning_time_slot_ids)
-        has_night_and_morning = bool(night_time_slot_ids_set) and bool(morning_time_slot_ids_set)
+        num_working_slots = len(working_time_slot_ids)
 
         employee_ids = [e.id for e in employees]
         machine_ids = [m.id for m in machines]
@@ -151,15 +153,12 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
         for (_, d), a in locked.items():
             locked_capacity_used[(a.machine_id, d)] += 1
 
-        # Track locked-in night/morning for the rest constraint.
-        locked_night: Set[Tuple[str, dt.date]] = set()
-        locked_morning: Set[Tuple[str, dt.date]] = set()
-        if has_night_and_morning:
-            for (e_id, d), a in locked.items():
-                if a.time_slot_id in night_time_slot_ids_set:
-                    locked_night.add((e_id, d))
-                if a.time_slot_id in morning_time_slot_ids_set:
-                    locked_morning.add((e_id, d))
+        # Track the slot id of locked assignments so the rest constraint
+        # can forbid the corresponding successor slots on the next day.
+        locked_slot_id_by_emp_day: Dict[Tuple[str, dt.date], str] = {}
+        for (e_id, d), a in locked.items():
+            if a.time_slot_id and a.time_slot_id in working_time_slot_set:
+                locked_slot_id_by_emp_day[(e_id, d)] = a.time_slot_id
 
         # ── Build CP-SAT model ───────────────────────────────────────────────
         model = cp_model.CpModel()
@@ -565,40 +564,66 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
 
             model.add(sum(overlaps) + locked_count >= required_count)
 
-        # Rest constraint: no Nuit followed by Matin next day
-        if has_night_and_morning:
+        # Rest constraint: each working slot lasts 8h. After shift X the
+        # next REST_GAP_SLOTS slots in the daily sequence (sorted by
+        # sort_order) are forbidden, which guarantees a 16h rest before
+        # the next shift can start. Same day successors are already
+        # excluded by the single shift per day rule, so we only build
+        # cross day forbidden pairs here.
+        if num_working_slots >= 1:
+            slot_position_by_id: Dict[str, int] = {
+                ts_id: idx for idx, ts_id in enumerate(working_time_slot_ids)
+            }
+
+            forbidden_successor_pairs: List[Tuple[int, int, int]] = []
+            for i in range(num_working_slots):
+                for gap in range(1, REST_GAP_SLOTS + 1):
+                    target = i + gap
+                    day_offset = target // num_working_slots
+                    if day_offset == 0:
+                        continue
+                    next_i = target % num_working_slots
+                    forbidden_successor_pairs.append((i, day_offset, next_i))
+
             for e_id in employee_ids:
-                for idx in range(len(days) - 1):
-                    d0 = days[idx]
-                    d1 = days[idx + 1]
+                for idx, d0 in enumerate(days):
+                    for curr_i, day_offset, next_i in forbidden_successor_pairs:
+                        d1_idx = idx + day_offset
+                        if d1_idx >= len(days):
+                            continue
+                        d1 = days[d1_idx]
 
-                    d0_locked = (e_id, d0) in locked_emp_days
-                    d1_locked = (e_id, d1) in locked_emp_days
+                        ts_curr = working_time_slot_ids[curr_i]
+                        ts_next = working_time_slot_ids[next_i]
 
-                    if d0_locked and d1_locked:
-                        continue
+                        d0_locked = (e_id, d0) in locked_emp_days
+                        d1_locked = (e_id, d1) in locked_emp_days
 
-                    if d0_locked:
-                        if (e_id, d0) in locked_night:
-                            morning_lits = [t[(e_id, d1, ts_id)] for ts_id in morning_time_slot_ids_set if (e_id, d1, ts_id) in t]
-                            if morning_lits:
-                                model.add(sum(morning_lits) == 0)
-                        continue
+                        if d0_locked and d1_locked:
+                            continue
 
-                    if d1_locked:
-                        if (e_id, d1) in locked_morning:
-                            night_lits = [t[(e_id, d0, ts_id)] for ts_id in night_time_slot_ids_set if (e_id, d0, ts_id) in t]
-                            if night_lits:
-                                model.add(sum(night_lits) == 0)
-                        continue
+                        if d0_locked:
+                            if locked_slot_id_by_emp_day.get((e_id, d0)) != ts_curr:
+                                continue
+                            next_lit = t.get((e_id, d1, ts_next))
+                            if next_lit is not None:
+                                model.add(next_lit == 0)
+                            continue
 
-                    night_lits = [t[(e_id, d0, ts_id)] for ts_id in night_time_slot_ids_set if (e_id, d0, ts_id) in t]
-                    morning_lits_next = [t[(e_id, d1, ts_id)] for ts_id in morning_time_slot_ids_set if (e_id, d1, ts_id) in t]
+                        if d1_locked:
+                            if locked_slot_id_by_emp_day.get((e_id, d1)) != ts_next:
+                                continue
+                            curr_lit = t.get((e_id, d0, ts_curr))
+                            if curr_lit is not None:
+                                model.add(curr_lit == 0)
+                            continue
 
-                    if not night_lits or not morning_lits_next:
-                        continue
+                        curr_lit = t.get((e_id, d0, ts_curr))
+                        next_lit = t.get((e_id, d1, ts_next))
+                        if curr_lit is None or next_lit is None:
+                            continue
 
-                    model.add(sum(night_lits) + sum(morning_lits_next) <= 1)
+                        model.add(curr_lit + next_lit <= 1)
 
         # ── Stability objective (re-plan): prefer keeping reference assignments ─
         stability_keep_vars: List[cp_model.IntVar] = []

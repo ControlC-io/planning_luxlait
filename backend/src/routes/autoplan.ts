@@ -501,6 +501,7 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
         name: ts.name,
         short_name: ts.shortName,
         color: ts.color,
+        sort_order: ts.sortOrder,
       })),
       unavailable_days: unavailableDays.map((es) => ({
         employee_id: es.employeeId,
