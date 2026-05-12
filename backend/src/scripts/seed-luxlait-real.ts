@@ -8,6 +8,11 @@ const uuid = () => randomUUID();
 // staffing requirement that applies to every day (1970-01-01).
 const GLOBAL_SHIFT_MIN_DATE = new Date("1970-01-01T00:00:00.000Z");
 
+// Year used to seed luxlait_weekly_machine_closed_shifts. Recurring weekday
+// closures are materialised for every ISO week of this year. The admin UI
+// can later override or extend coverage to other years.
+const SEED_YEAR = 2026;
+
 // =============================================================================
 // REFERENCE DATA (extracted from "Luxlait - Donnees planning mai 26.xlsx")
 // =============================================================================
@@ -234,8 +239,7 @@ async function purgePlanning() {
   await prisma.luxlaitMachineDowntimeShift.deleteMany();
   await prisma.luxlaitMachineDowntime.deleteMany();
   await prisma.luxlaitDefaultMachineDowntime.deleteMany();
-  await prisma.luxlaitMachineClosedWeekdayShift.deleteMany();
-  await prisma.luxlaitMachineClosedWeekday.deleteMany();
+  await prisma.luxlaitWeeklyMachineClosedShift.deleteMany();
   await prisma.luxlaitMachineStaffingRequirement.deleteMany();
   await prisma.luxlaitMachineOpenShift.deleteMany();
   await prisma.luxlaitEmployeeMachineSkill.deleteMany();
@@ -378,10 +382,21 @@ async function seed() {
       }
     }
     for (const wd of agg.closedWeekdays) {
-      await prisma.luxlaitMachineClosedWeekdayShift.create({
-        data: { id: uuid(), machineId, weekday: wd, timeSlotId: slotId },
-      });
-      closedCount++;
+      // Seed every ISO week of SEED_YEAR so the closure applies year round.
+      // Frontend admin UI can later override individual weeks.
+      for (let week = 1; week <= 53; week++) {
+        await prisma.luxlaitWeeklyMachineClosedShift.create({
+          data: {
+            id: uuid(),
+            year: SEED_YEAR,
+            isoWeek: week,
+            machineId,
+            weekday: wd,
+            timeSlotId: slotId,
+          },
+        });
+        closedCount++;
+      }
     }
     if (agg.minStaff > 0) {
       await prisma.luxlaitMachineStaffingRequirement.create({

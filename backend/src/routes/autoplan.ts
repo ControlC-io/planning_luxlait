@@ -7,20 +7,6 @@ const parseYYYYMMDD = (s: string): Date => new Date(`${s}T00:00:00.000Z`);
 const toYYYYMMDD = (d: Date): string => d.toISOString().slice(0, 10);
 const GLOBAL_SHIFT_MIN_DATE = parseYYYYMMDD("1970-01-01");
 
-function expandClosedWeekdays(from: Date, to: Date, weekdays: number[]): string[] {
-  if (!weekdays.length) return [];
-  const weekdaySet = new Set(weekdays);
-  const dates: string[] = [];
-  const cursor = new Date(from);
-  while (cursor <= to) {
-    if (weekdaySet.has(cursor.getUTCDay())) {
-      dates.push(toYYYYMMDD(cursor));
-    }
-    cursor.setUTCDate(cursor.getUTCDate() + 1);
-  }
-  return dates;
-}
-
 function listDateRange(from: Date, to: Date): string[] {
   const dates: string[] = [];
   const cursor = new Date(from);
@@ -31,26 +17,77 @@ function listDateRange(from: Date, to: Date): string[] {
   return dates;
 }
 
-function expandClosedWeekdayShifts(
+/**
+ * Compute the ISO 8601 year and week number of a UTC date.
+ * Mirrors the admin ISO week calculation (see frontend lib/machineWeeklyClosures.ts)
+ * but uses UTC consistently with how planning dates are stored and iterated.
+ */
+function isoWeekUtc(d: Date): { year: number; week: number } {
+  const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const isoDow = (t.getUTCDay() + 6) % 7;
+  t.setUTCDate(t.getUTCDate() - isoDow + 3);
+  const year = t.getUTCFullYear();
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const jan4Dow = (jan4.getUTCDay() + 6) % 7;
+  const week1Monday = new Date(Date.UTC(year, 0, 4 - jan4Dow));
+  const week = 1 + Math.round((t.getTime() - week1Monday.getTime()) / (7 * 86_400_000));
+  return { year, week };
+}
+
+/**
+ * List the distinct (year, isoWeek) pairs covered by a planning range.
+ * Used to scope the luxlait_weekly_machine_closed_shifts query.
+ */
+function listIsoWeeksInRange(from: Date, to: Date): Array<{ year: number; week: number }> {
+  const seen = new Set<string>();
+  const out: Array<{ year: number; week: number }> = [];
+  const cursor = new Date(from);
+  while (cursor <= to) {
+    const { year, week } = isoWeekUtc(cursor);
+    const k = `${year}|${week}`;
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push({ year, week });
+    }
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return out;
+}
+
+/**
+ * Expand luxlait_weekly_machine_closed_shifts rows into concrete dated
+ * (machine, date, time_slot) closures within [from, to].
+ *
+ * Each row carries (year, isoWeek, weekday, machineId, timeSlotId) where
+ * weekday matches JavaScript getDay (0 = Sunday). A given calendar day is
+ * closed for that machine and slot if its (isoWeekUtc.year, isoWeekUtc.week,
+ * UTC weekday) matches the row.
+ */
+function expandWeeklyClosedShifts(
   from: Date,
   to: Date,
-  rows: Array<{ machineId: string; weekday: number; timeSlotId: string }>
+  rows: Array<{ machineId: string; year: number; isoWeek: number; weekday: number; timeSlotId: string }>
 ): Array<{ machine_id: string; day_date: string; time_slot_id: string }> {
   if (!rows.length) return [];
-  const byMachineWeekday = new Map<string, Set<string>>();
-  for (const row of rows) {
-    const key = `${row.machineId}|${row.weekday}`;
-    if (!byMachineWeekday.has(key)) byMachineWeekday.set(key, new Set<string>());
-    byMachineWeekday.get(key)!.add(row.timeSlotId);
+
+  const byKey = new Map<string, Set<string>>();
+  for (const r of rows) {
+    const key = `${r.year}|${r.isoWeek}|${r.weekday}|${r.machineId}`;
+    if (!byKey.has(key)) byKey.set(key, new Set<string>());
+    byKey.get(key)!.add(r.timeSlotId);
   }
+
   const out: Array<{ machine_id: string; day_date: string; time_slot_id: string }> = [];
   const cursor = new Date(from);
   while (cursor <= to) {
     const weekday = cursor.getUTCDay();
+    const { year, week } = isoWeekUtc(cursor);
     const dayDate = toYYYYMMDD(cursor);
-    for (const [key, slots] of byMachineWeekday.entries()) {
-      const [machineId, wd] = key.split('|');
-      if (Number(wd) !== weekday) continue;
+    for (const [key, slots] of byKey.entries()) {
+      const [yearStr, weekStr, wdStr, machineId] = key.split('|');
+      if (Number(yearStr) !== year) continue;
+      if (Number(weekStr) !== week) continue;
+      if (Number(wdStr) !== weekday) continue;
       for (const timeSlotId of slots) {
         out.push({ machine_id: machineId, day_date: dayDate, time_slot_id: timeSlotId });
       }
@@ -66,6 +103,9 @@ const SOLVER_SETTING_KEYS = {
   solveTimeLimitSeconds: "planning_solver_solve_time_limit_seconds",
   enforceTimeSlotWhenAssigned: "planning_solver_enforce_time_slot_when_assigned",
   stabilityWeight: "planning_solver_stability_weight",
+  maxWorkDaysPerWeek: "planning_solver_max_work_days_per_week",
+  minRestDaysPerWeek: "planning_solver_min_rest_days_per_week",
+  maxConsecutiveWorkDays: "planning_solver_max_consecutive_work_days",
 } as const;
 
 function readNumberFromProviderConfig(config: unknown, defaultValue: number): number {
@@ -152,6 +192,8 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
 
     const t0 = performance.now();
 
+    const isoWeekKeys = listIsoWeeksInRange(from, to);
+
     const [
       employees,
       machines,
@@ -161,9 +203,8 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       unavailableDays,
       unavailableShiftRows,
       machineDowntimes,
-      machineClosedWeekdays,
       machineDowntimeShifts,
-      machineClosedWeekdayShifts,
+      weeklyMachineClosedShifts,
       staffingRequirements,
       settings,
       existingAssignments,
@@ -182,11 +223,22 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       prisma.luxlaitMachineDowntime.findMany({
         where: { dayDate: { gte: from, lte: to } },
       }),
-      prisma.luxlaitMachineClosedWeekday.findMany(),
       prisma.luxlaitMachineDowntimeShift.findMany({
         where: { dayDate: { gte: from, lte: to } },
       }),
-      prisma.luxlaitMachineClosedWeekdayShift.findMany(),
+      isoWeekKeys.length
+        ? prisma.luxlaitWeeklyMachineClosedShift.findMany({
+            where: {
+              OR: isoWeekKeys.map(({ year, week }) => ({ year, isoWeek: week })),
+            },
+          })
+        : Promise.resolve([] as Array<{
+            machineId: string;
+            year: number;
+            isoWeek: number;
+            weekday: number;
+            timeSlotId: string;
+          }>),
       prisma.luxlaitMachineStaffingRequirement.findMany({
         where: { dayDate: GLOBAL_SHIFT_MIN_DATE },
       }),
@@ -199,6 +251,9 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
               SOLVER_SETTING_KEYS.solveTimeLimitSeconds,
               SOLVER_SETTING_KEYS.enforceTimeSlotWhenAssigned,
               SOLVER_SETTING_KEYS.stabilityWeight,
+              SOLVER_SETTING_KEYS.maxWorkDaysPerWeek,
+              SOLVER_SETTING_KEYS.minRestDaysPerWeek,
+              SOLVER_SETTING_KEYS.maxConsecutiveWorkDays,
             ],
           },
         },
@@ -237,6 +292,18 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       settingByKey.get(SOLVER_SETTING_KEYS.stabilityWeight),
       100
     );
+    const dbMaxWorkDaysPerWeek = readNumberFromProviderConfig(
+      settingByKey.get(SOLVER_SETTING_KEYS.maxWorkDaysPerWeek),
+      6
+    );
+    const dbMinRestDaysPerWeek = readNumberFromProviderConfig(
+      settingByKey.get(SOLVER_SETTING_KEYS.minRestDaysPerWeek),
+      1
+    );
+    const dbMaxConsecutiveWorkDays = readNumberFromProviderConfig(
+      settingByKey.get(SOLVER_SETTING_KEYS.maxConsecutiveWorkDays),
+      6
+    );
 
     const openShiftsByMachineId: Record<string, string[]> = {};
     for (const os of openShifts) {
@@ -250,28 +317,31 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       downtimesByMachineId[dt.machineId]!.push(dt.dayDate.toISOString().slice(0, 10));
     }
 
-    const closedWeekdaysByMachineId: Record<string, number[]> = {};
-    for (const cw of machineClosedWeekdays) {
-      if (!closedWeekdaysByMachineId[cw.machineId]) closedWeekdaysByMachineId[cw.machineId] = [];
-      closedWeekdaysByMachineId[cw.machineId]!.push(cw.weekday);
-    }
-
+    /*
+     * Recurring weekday closures are now driven by luxlait_weekly_machine_closed_shifts
+     * (per ISO week, per shift). The legacy luxlait_machine_closed_weekday and
+     * luxlait_machine_closed_weekday_shift tables are no longer consumed by the solver.
+     * Full day closures still come from luxlait_machine_downtimes (one off events).
+     */
     const mergedDowntimesByMachineId: Record<string, string[]> = {};
     for (const m of machines) {
       const dated = downtimesByMachineId[m.id] ?? [];
-      const recurring = expandClosedWeekdays(from, to, closedWeekdaysByMachineId[m.id] ?? []);
-      mergedDowntimesByMachineId[m.id] = [...new Set([...dated, ...recurring])].sort();
+      mergedDowntimesByMachineId[m.id] = [...new Set(dated)].sort();
     }
     const planningDates = listDateRange(from, to);
 
-    const expandedClosedShiftRows = expandClosedWeekdayShifts(from, to, machineClosedWeekdayShifts);
+    const expandedWeeklyClosedShifts = expandWeeklyClosedShifts(
+      from,
+      to,
+      weeklyMachineClosedShifts,
+    );
     const machineClosedShifts = [
       ...machineDowntimeShifts.map((row) => ({
         machine_id: row.machineId,
         day_date: row.dayDate.toISOString().slice(0, 10),
         time_slot_id: row.timeSlotId,
       })),
-      ...expandedClosedShiftRows,
+      ...expandedWeeklyClosedShifts,
     ];
     const closedShiftKeySet = new Set(
       machineClosedShifts.map((row) => `${row.machine_id}|${row.day_date}|${row.time_slot_id}`)
@@ -396,8 +466,11 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
         ];
         referenceAssignmentRows = afterBoundary.filter((a) => freedPairs.has(`${a.employee_id}|${a.day_date}`));
       } else {
-        lockedAssignmentRows = allAssignmentRows;
-        referenceAssignmentRows = [];
+        /* No status-after-assignment conflicts: still replan from the boundary onward.
+           Lock only days before the boundary; current plan from the boundary date on
+           becomes reference (stability objective + hints), not hard-locked rows. */
+        lockedAssignmentRows = beforeBoundary;
+        referenceAssignmentRows = afterBoundary;
       }
     }
 
@@ -448,6 +521,9 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
         enforce_time_slot_when_assigned:
           body.constraints?.enforce_time_slot_when_assigned ?? dbEnforceTimeSlotWhenAssigned,
         stability_weight: isReplan ? dbStabilityWeight : 0,
+        max_work_days_per_week: dbMaxWorkDaysPerWeek,
+        min_rest_days_per_week: dbMinRestDaysPerWeek,
+        max_consecutive_work_days: dbMaxConsecutiveWorkDays,
       },
     };
 
@@ -517,11 +593,7 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
         });
       }
 
-      const affectedDaySet = affectedDays;
-      json.assignments = solverAssignments.filter((a: any) => {
-        if (a.day_date < boundaryStr) return false;
-        return affectedDaySet.has(a.day_date);
-      });
+      json.assignments = solverAssignments.filter((a: any) => a.day_date >= boundaryStr);
 
       const changesCount = json.assignments.filter((a: any) => {
         const key = `${a.employee_id}|${a.day_date}`;

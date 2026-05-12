@@ -213,25 +213,12 @@ model LuxlaitMachine {
   openShifts        LuxlaitMachineOpenShift[]
   dailyAssignments  LuxlaitDailyAssignment[]
   downtimes         LuxlaitMachineDowntime[]
-  closedWeekdays    LuxlaitMachineClosedWeekday[]
   downtimeShifts    LuxlaitMachineDowntimeShift[]
-  closedWeekdayShifts LuxlaitMachineClosedWeekdayShift[]
   staffingRequirements LuxlaitMachineStaffingRequirement[]
   weeklyAssignments LuxlaitWeeklyAssignment[]
+  weeklyClosedShifts LuxlaitWeeklyMachineClosedShift[]
 
   @@map("luxlait_machines")
-}
-
-model LuxlaitMachineClosedWeekday {
-  id        String   @id @default(uuid()) @db.Uuid
-  machineId String   @map("machine_id") @db.Uuid
-  weekday   Int
-  createdAt DateTime @default(now()) @map("created_at")
-
-  machine LuxlaitMachine @relation(fields: [machineId], references: [id], onDelete: Cascade)
-
-  @@unique([machineId, weekday])
-  @@map("luxlait_machine_closed_weekdays")
 }
 
 model LuxlaitTimeSlot {
@@ -246,10 +233,27 @@ model LuxlaitTimeSlot {
   machineOpenShifts LuxlaitMachineOpenShift[]
   weeklyEmployeeShiftStatuses LuxlaitWeeklyEmployeeShiftStatus[]
   machineDowntimeShifts LuxlaitMachineDowntimeShift[]
-  machineClosedWeekdayShifts LuxlaitMachineClosedWeekdayShift[]
   machineStaffingRequirements LuxlaitMachineStaffingRequirement[]
+  weeklyClosedShifts LuxlaitWeeklyMachineClosedShift[]
 
   @@map("luxlait_time_slots")
+}
+
+model LuxlaitWeeklyMachineClosedShift {
+  id         String   @id @default(uuid()) @db.Uuid
+  year       Int
+  isoWeek    Int      @map("iso_week")
+  machineId  String   @map("machine_id") @db.Uuid
+  weekday    Int
+  timeSlotId String   @map("time_slot_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  machine  LuxlaitMachine  @relation(fields: [machineId], references: [id], onDelete: Cascade)
+  timeSlot LuxlaitTimeSlot @relation(fields: [timeSlotId], references: [id], onDelete: Cascade)
+
+  @@unique([year, isoWeek, machineId, weekday, timeSlotId])
+  @@index([year, isoWeek])
+  @@map("luxlait_weekly_machine_closed_shifts")
 }
 
 model LuxlaitMachineOpenShift {
@@ -321,20 +325,6 @@ model LuxlaitMachineDowntimeShift {
   @@map("luxlait_machine_downtime_shifts")
 }
 
-model LuxlaitMachineClosedWeekdayShift {
-  id         String   @id @default(uuid()) @db.Uuid
-  machineId  String   @map("machine_id") @db.Uuid
-  weekday    Int
-  timeSlotId String   @map("time_slot_id") @db.Uuid
-  createdAt  DateTime @default(now()) @map("created_at")
-
-  machine  LuxlaitMachine  @relation(fields: [machineId], references: [id], onDelete: Cascade)
-  timeSlot LuxlaitTimeSlot @relation(fields: [timeSlotId], references: [id], onDelete: Cascade)
-
-  @@unique([machineId, weekday, timeSlotId])
-  @@map("luxlait_machine_closed_weekday_shifts")
-}
-
 model LuxlaitMachineStaffingRequirement {
   id           String   @id @default(uuid()) @db.Uuid
   machineId    String   @map("machine_id") @db.Uuid
@@ -348,6 +338,30 @@ model LuxlaitMachineStaffingRequirement {
 
   @@unique([machineId, dayDate, timeSlotId])
   @@map("luxlait_machine_staffing_requirements")
+}
+
+enum SolverConstraintCategory {
+  HARD
+  SOFT
+  PREF
+}
+
+model LuxlaitSolverConstraint {
+  id          String                   @id
+  category    SolverConstraintCategory
+  groupName   String                   @map("group_name")
+  title       String
+  description String                   @db.Text
+  metric      String?
+  impact      String?                  @db.Text
+  weight      Int?
+  active      Boolean                  @default(true)
+  editable    Boolean                  @default(false)
+  sortOrder   Int                      @default(0) @map("sort_order")
+  createdAt   DateTime                 @default(now()) @map("created_at")
+  updatedAt   DateTime                 @updatedAt @map("updated_at")
+
+  @@map("luxlait_solver_constraints")
 }
 
 // Link Better Auth User -> planning profile (optional)

@@ -204,6 +204,81 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                 else:
                     model.add(sum(t[(e_id, d, ts_id)] for ts_id in working_time_slot_ids) <= assigned)
 
+        # ── Hard caps inspired by Luxembourg Code du travail ────────────────
+        # Locked assignments count toward every cap. Setting any limit to 0
+        # disables that specific rule.
+        max_work_days_per_week = int(req.constraints.max_work_days_per_week)
+        min_rest_days_per_week = int(req.constraints.min_rest_days_per_week)
+        max_consecutive_work_days = int(req.constraints.max_consecutive_work_days)
+
+        # Group planning days by ISO calendar week (Mon to Sun).
+        days_by_iso_week: Dict[Tuple[int, int], List[dt.date]] = defaultdict(list)
+        for d in days:
+            iso_year, iso_week, _ = d.isocalendar()
+            days_by_iso_week[(iso_year, iso_week)].append(d)
+
+        if max_work_days_per_week > 0 or min_rest_days_per_week > 0:
+            for e_id in employee_ids:
+                for _week_key, week_days in days_by_iso_week.items():
+                    locked_count_in_week = sum(
+                        1 for d in week_days if (e_id, d) in locked_emp_days
+                    )
+                    solver_lits = [
+                        assigned_any[(e_id, d)]
+                        for d in week_days
+                        if (e_id, d) in assigned_any
+                    ]
+
+                    week_caps: List[int] = []
+                    if max_work_days_per_week > 0:
+                        week_caps.append(max_work_days_per_week)
+                    if min_rest_days_per_week > 0:
+                        # Cap derived from the legal floor of off days.
+                        # Apply only inside the planning window of this
+                        # week so partial weeks are not forced to extra off
+                        # days they cannot take.
+                        week_caps.append(max(0, len(week_days) - min_rest_days_per_week))
+
+                    if not week_caps:
+                        continue
+
+                    effective_cap = min(week_caps)
+                    remaining = effective_cap - locked_count_in_week
+                    if remaining <= 0:
+                        # Locked plan already saturates the cap. Force every
+                        # solver decided day off. We do not error out: locked
+                        # rows are accepted by the user and may pre-violate
+                        # the cap.
+                        for lit in solver_lits:
+                            model.add(lit == 0)
+                        continue
+
+                    if solver_lits:
+                        model.add(sum(solver_lits) <= remaining)
+
+        if max_consecutive_work_days > 0 and len(days) > max_consecutive_work_days:
+            window_size = max_consecutive_work_days + 1
+            for e_id in employee_ids:
+                for start in range(len(days) - max_consecutive_work_days):
+                    window = days[start : start + window_size]
+                    locked_in_window = sum(
+                        1 for d in window if (e_id, d) in locked_emp_days
+                    )
+                    solver_lits_window = [
+                        assigned_any[(e_id, d)]
+                        for d in window
+                        if (e_id, d) in assigned_any
+                    ]
+
+                    remaining = max_consecutive_work_days - locked_in_window
+                    if remaining <= 0:
+                        for lit in solver_lits_window:
+                            model.add(lit == 0)
+                        continue
+
+                    if solver_lits_window:
+                        model.add(sum(solver_lits_window) <= remaining)
+
         # ── Shared overlap cache: ov[(e,d,m,ts)] = x[(e,d,m)] AND t[(e,d,ts)] ─
         overlap_cache: Dict[Tuple[str, dt.date, str, str], cp_model.IntVar] = {}
 
