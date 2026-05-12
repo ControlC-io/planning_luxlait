@@ -33,6 +33,9 @@ class TimeSlotInput(BaseModel):
     name: str
     short_name: Optional[str] = None
     color: Optional[str] = None
+    # Position of the slot in the daily sequence. Used by the rest
+    # constraint to know which slot follows which.
+    sort_order: int = 0
 
 
 class UnavailableDayInput(BaseModel):

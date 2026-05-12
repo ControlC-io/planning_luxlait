@@ -230,6 +230,7 @@ const main = async () => {
       name: ts.name,
       short_name: ts.shortName,
       color: ts.color,
+      sort_order: ts.sortOrder,
     })),
     unavailable_days: unavailableDays.map((u) => ({
       employee_id: u.employeeId,
