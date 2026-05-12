@@ -17,6 +17,7 @@ import adminRouter from './routes/admin';
 import rolesRouter from './routes/roles';
 import counterRouter from './routes/counter';
 import planningRouter from './routes/planning';
+import solverConstraintsRouter from './routes/solverConstraints';
 import autoPlanRouter from './routes/autoplan';
 
 const app = express();
@@ -24,8 +25,8 @@ const PORT = process.env.PORT || 3000;
 
 // ─── Core Middleware ───────────────────────────────────────────────────────────
 app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // ─── Swagger UI (public) ───────────────────────────────────────────────────────
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
@@ -112,6 +113,7 @@ app.use('/api/counter', counterRouter);
 
 // ─── Planning Routes (JWT protected) ───────────────────────────────────────
 app.use('/api/planning', planningRouter);
+app.use('/api/planning', solverConstraintsRouter);
 app.use('/api/planning', autoPlanRouter);
 
 // ─── Admin API Routes (x-admin-secret auth; jwtAuth skips /api/admin via PUBLIC_ROUTES) ─

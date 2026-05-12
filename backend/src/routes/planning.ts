@@ -6,6 +6,7 @@ const router = express.Router();
 
 const toYYYYMMDD = (d: Date): string => d.toISOString().slice(0, 10);
 const parseYYYYMMDD = (s: string): Date => new Date(`${s}T00:00:00.000Z`);
+const GLOBAL_SHIFT_MIN_DATE = parseYYYYMMDD('1970-01-01');
 
 function isAdminOrManager(roles: string[] | undefined): boolean {
   const normalized = (roles ?? []).map((r) => String(r).toLowerCase());
@@ -67,6 +68,7 @@ function mapSkill(sk: any) {
     id: sk.id,
     employee_id: sk.employeeId,
     machine_id: sk.machineId,
+    level: sk.level,
   };
 }
 
@@ -91,6 +93,17 @@ function mapWeeklyEmployeeStatus(es: any) {
   };
 }
 
+function mapWeeklyEmployeeShiftStatus(es: any) {
+  return {
+    id: es.id,
+    day_date: toYYYYMMDD(es.dayDate),
+    employee_id: es.employeeId,
+    status_id: es.statusId,
+    time_slot_id: es.timeSlotId,
+    created_at: es.createdAt ? toYYYYMMDD(new Date(es.createdAt)) : null,
+  };
+}
+
 function mapMachineOpenShift(os: any) {
   return {
     id: os.id,
@@ -106,6 +119,39 @@ function mapMachineDowntime(dt: any) {
     day_date: toYYYYMMDD(dt.dayDate),
     reason: dt.reason,
     created_at: dt.createdAt ? toYYYYMMDD(new Date(dt.createdAt)) : null,
+  };
+}
+
+function mapMachineDowntimeShift(dt: any) {
+  return {
+    id: dt.id,
+    machine_id: dt.machineId,
+    day_date: toYYYYMMDD(dt.dayDate),
+    time_slot_id: dt.timeSlotId,
+    reason: dt.reason,
+    created_at: dt.createdAt ? toYYYYMMDD(new Date(dt.createdAt)) : null,
+  };
+}
+
+function mapMachineStaffingRequirement(row: any) {
+  return {
+    id: row.id,
+    machine_id: row.machineId,
+    time_slot_id: row.timeSlotId,
+    min_employees: row.minEmployees,
+    created_at: row.createdAt ? toYYYYMMDD(new Date(row.createdAt)) : null,
+  };
+}
+
+function mapWeeklyMachineClosedShift(row: any) {
+  return {
+    id: row.id,
+    year: row.year,
+    iso_week: row.isoWeek,
+    machine_id: row.machineId,
+    weekday: row.weekday,
+    time_slot_id: row.timeSlotId,
+    created_at: row.createdAt ? toYYYYMMDD(new Date(row.createdAt)) : null,
   };
 }
 
@@ -207,6 +253,55 @@ router.get('/luxlait_employee_machine_skills', async (_req: Request, res: Respon
   }
 });
 
+router.post('/luxlait_employee_machine_skills', async (req: Request, res: Response) => {
+  try {
+    if (!isAdminOrManager(req.userRoles)) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+    const body = req.body as { employee_id: string; machine_id: string };
+    if (!body?.employee_id || !body?.machine_id) {
+      res.status(400).json({ error: 'employee_id and machine_id are required' });
+      return;
+    }
+    const created = await prisma.luxlaitEmployeeMachineSkill.create({
+      data: {
+        employeeId: body.employee_id,
+        machineId: body.machine_id,
+      },
+    });
+    res.json({ data: mapSkill(created) });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to create skill';
+    res.status(500).json({ error: message });
+  }
+});
+
+router.delete('/luxlait_employee_machine_skills', async (req: Request, res: Response) => {
+  try {
+    if (!isAdminOrManager(req.userRoles)) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+    const body = req.body as { employee_id?: string; machine_id?: string };
+    const employeeId = body?.employee_id;
+    const machineId = body?.machine_id;
+    if (!employeeId || !machineId) {
+      res.status(400).json({ error: 'employee_id and machine_id are required' });
+      return;
+    }
+    await prisma.luxlaitEmployeeMachineSkill.deleteMany({
+      where: {
+        employeeId,
+        machineId,
+      },
+    });
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ error: 'Failed to delete skill' });
+  }
+});
+
 router.get('/luxlait_daily_assignments', async (req: Request, res: Response) => {
   try {
     const from = req.query.fromDate as string | undefined;
@@ -249,9 +344,352 @@ router.get('/luxlait_weekly_employee_statuses', async (req: Request, res: Respon
   }
 });
 
+router.get('/luxlait_weekly_employee_shift_statuses', async (req: Request, res: Response) => {
+  try {
+    const from = req.query.fromDate as string | undefined;
+    const to = req.query.toDate as string | undefined;
+
+    if (!from || !to) {
+      res.status(400).json({ error: 'fromDate and toDate are required' });
+      return;
+    }
+
+    const statuses = await prisma.luxlaitWeeklyEmployeeShiftStatus.findMany({
+      where: {
+        dayDate: { gte: parseYYYYMMDD(from), lte: parseYYYYMMDD(to) },
+      },
+      orderBy: [{ dayDate: 'asc' }, { employeeId: 'asc' }, { timeSlotId: 'asc' }],
+    });
+    res.json(statuses.map(mapWeeklyEmployeeShiftStatus));
+  } catch {
+    res.status(500).json({ error: 'Failed to fetch weekly employee shift statuses' });
+  }
+});
+
+router.get('/luxlait_weekly_machine_closed_shifts', async (req: Request, res: Response) => {
+  try {
+    const yearParam = req.query.year;
+    const year =
+      typeof yearParam === 'string' ? Number(yearParam) : Number.NaN;
+    if (!Number.isInteger(year)) {
+      res.status(400).json({ error: 'year query parameter is required' });
+      return;
+    }
+
+    const rows = await prisma.luxlaitWeeklyMachineClosedShift.findMany({
+      where: { year },
+      orderBy: [
+        { isoWeek: 'asc' },
+        { machineId: 'asc' },
+        { weekday: 'asc' },
+        { timeSlotId: 'asc' },
+      ],
+    });
+    res.json(rows.map(mapWeeklyMachineClosedShift));
+  } catch (e) {
+    console.error('luxlait_weekly_machine_closed_shifts GET', e);
+    const detail =
+      process.env.NODE_ENV === 'development' && e instanceof Error ? e.message : undefined;
+    res.status(500).json({ error: 'Failed to fetch weekly machine closed shifts', detail });
+  }
+});
+
+/** Single ISO week (optional convenience; same data as filtering the year list client side) */
+router.get('/luxlait_weekly_machine_closed_shifts/:year/:week', async (req: Request, res: Response) => {
+  try {
+    const year = Number(req.params.year);
+    const isoWeek = Number(req.params.week);
+    if (!Number.isInteger(year) || !Number.isInteger(isoWeek)) {
+      res.status(400).json({ error: 'Invalid year or week' });
+      return;
+    }
+
+    const rows = await prisma.luxlaitWeeklyMachineClosedShift.findMany({
+      where: { year, isoWeek },
+      orderBy: [
+        { machineId: 'asc' },
+        { weekday: 'asc' },
+        { timeSlotId: 'asc' },
+      ],
+    });
+    res.json(rows.map(mapWeeklyMachineClosedShift));
+  } catch (e) {
+    console.error('luxlait_weekly_machine_closed_shifts GET :year/:week', e);
+    const detail =
+      process.env.NODE_ENV === 'development' && e instanceof Error ? e.message : undefined;
+    res.status(500).json({ error: 'Failed to fetch weekly machine closed shifts', detail });
+  }
+});
+
+router.put('/luxlait_weekly_machine_closed_shifts/:year/:week', async (req: Request, res: Response) => {
+  try {
+    if (!isAdminOrManager(req.userRoles)) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    const year = Number(req.params.year);
+    const isoWeek = Number(req.params.week);
+    if (!Number.isInteger(year) || !Number.isInteger(isoWeek)) {
+      res.status(400).json({ error: 'Invalid year or week' });
+      return;
+    }
+
+    const body = req.body as {
+      rows?: Array<{ machine_id: string; weekday: number; time_slot_id: string }>;
+    };
+    const incoming = Array.isArray(body?.rows) ? body.rows : [];
+    const normalized = [...new Map(
+      incoming
+        .filter(
+          (r) =>
+            r?.machine_id &&
+            Number.isInteger(Number(r.weekday)) &&
+            Number(r.weekday) >= 0 &&
+            Number(r.weekday) <= 6 &&
+            r.time_slot_id,
+        )
+        .map((r) => [
+          `${r.machine_id}|${r.weekday}|${r.time_slot_id}`,
+          {
+            machineId: r.machine_id,
+            weekday: Number(r.weekday),
+            timeSlotId: r.time_slot_id,
+          },
+        ]),
+    ).values()];
+
+    await prisma.$transaction(async (tx) => {
+      await tx.luxlaitWeeklyMachineClosedShift.deleteMany({
+        where: { year, isoWeek },
+      });
+      if (normalized.length === 0) return;
+      await tx.luxlaitWeeklyMachineClosedShift.createMany({
+        data: normalized.map((row) => ({
+          id: randomUUID(),
+          year,
+          isoWeek,
+          machineId: row.machineId,
+          weekday: row.weekday,
+          timeSlotId: row.timeSlotId,
+        })),
+        skipDuplicates: true,
+      });
+    });
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('luxlait_weekly_machine_closed_shifts PUT', e);
+    const detail =
+      process.env.NODE_ENV === 'development' && e instanceof Error ? e.message : undefined;
+    res.status(500).json({ error: 'Failed to update weekly machine closed shifts', detail });
+  }
+});
+
+router.post('/luxlait_weekly_machine_closed_shifts/duplicate', async (req: Request, res: Response) => {
+  try {
+    if (!isAdminOrManager(req.userRoles)) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    const body = req.body as {
+      year?: number;
+      sourceWeek?: number;
+      targetWeeks?: number[];
+    };
+    const year = Number(body?.year);
+    const sourceWeek = Number(body?.sourceWeek);
+    const targetWeeks = Array.isArray(body?.targetWeeks)
+      ? [...new Set(body.targetWeeks.map((w) => Number(w)).filter((w) => Number.isInteger(w) && w >= 1 && w <= 53))]
+      : [];
+
+    if (!Number.isInteger(year) || !Number.isInteger(sourceWeek) || targetWeeks.length === 0) {
+      res.status(400).json({ error: 'year, sourceWeek and targetWeeks are required' });
+      return;
+    }
+
+    const sourceRows = await prisma.luxlaitWeeklyMachineClosedShift.findMany({
+      where: { year, isoWeek: sourceWeek },
+    });
+
+    await prisma.$transaction(async (tx) => {
+      for (const tw of targetWeeks) {
+        if (tw === sourceWeek) continue;
+        await tx.luxlaitWeeklyMachineClosedShift.deleteMany({
+          where: { year, isoWeek: tw },
+        });
+        if (sourceRows.length === 0) continue;
+        await tx.luxlaitWeeklyMachineClosedShift.createMany({
+          data: sourceRows.map((r) => ({
+            id: randomUUID(),
+            year,
+            isoWeek: tw,
+            machineId: r.machineId,
+            weekday: r.weekday,
+            timeSlotId: r.timeSlotId,
+          })),
+          skipDuplicates: true,
+        });
+      }
+    });
+
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ error: 'Failed to duplicate weekly machine closed shifts' });
+  }
+});
+
 // -----------------------------------------------------------------------------
 // Mutations (used by Planning.tsx)
 // -----------------------------------------------------------------------------
+
+/**
+ * Wipes the planning for an inclusive date range (assignments, employee
+ * statuses, dated staffing requirements, machine downtimes) and then
+ * restores the baseline leaves and machine downtimes from the
+ * LuxlaitDefaultLeave / LuxlaitDefaultMachineDowntime catalogues (loaded
+ * from the source Excel file).
+ *
+ * Global staffing requirements (dayDate = 1970-01-01) are not touched.
+ */
+router.post('/clear_month_planning_test', async (req: Request, res: Response) => {
+  try {
+    if (!isAdminOrManager(req.userRoles)) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    const body = req.body as { fromDate?: string; toDate?: string };
+    const from = body?.fromDate;
+    const to = body?.toDate;
+    if (!from || !to) {
+      res.status(400).json({ error: 'fromDate and toDate are required' });
+      return;
+    }
+
+    const fromD = parseYYYYMMDD(from);
+    const toD = parseYYYYMMDD(to);
+    if (fromD > toD) {
+      res.status(400).json({ error: 'fromDate must be on or before toDate' });
+      return;
+    }
+
+    const range = { gte: fromD, lte: toD };
+
+    const result = await prisma.$transaction(async (tx) => {
+      const dailyAssignments = await tx.luxlaitDailyAssignment.deleteMany({ where: { dayDate: range } });
+      const weeklyStatuses = await tx.luxlaitWeeklyEmployeeStatus.deleteMany({ where: { dayDate: range } });
+      const weeklyShiftStatuses = await tx.luxlaitWeeklyEmployeeShiftStatus.deleteMany({ where: { dayDate: range } });
+      const staffingRequirements = await tx.luxlaitMachineStaffingRequirement.deleteMany({ where: { dayDate: range } });
+      const machineDowntimeShifts = await tx.luxlaitMachineDowntimeShift.deleteMany({ where: { dayDate: range } });
+      const machineDowntimes = await tx.luxlaitMachineDowntime.deleteMany({ where: { dayDate: range } });
+
+      // Restore default leaves from the catalogue for the cleared range.
+      const defaultLeaves = await tx.luxlaitDefaultLeave.findMany({ where: { dayDate: range } });
+      let restoredLeaves = 0;
+      if (defaultLeaves.length > 0) {
+        const created = await tx.luxlaitWeeklyEmployeeStatus.createMany({
+          data: defaultLeaves.map((dl) => ({
+            id: randomUUID(),
+            employeeId: dl.employeeId,
+            statusId: dl.statusId,
+            dayDate: dl.dayDate,
+          })),
+          skipDuplicates: true,
+        });
+        restoredLeaves = created.count;
+      }
+
+      // Restore default machine downtimes from the catalogue for the cleared range.
+      const defaultDowntimes = await tx.luxlaitDefaultMachineDowntime.findMany({ where: { dayDate: range } });
+      let restoredDowntimes = 0;
+      if (defaultDowntimes.length > 0) {
+        const created = await tx.luxlaitMachineDowntime.createMany({
+          data: defaultDowntimes.map((dd) => ({
+            id: randomUUID(),
+            machineId: dd.machineId,
+            dayDate: dd.dayDate,
+          })),
+          skipDuplicates: true,
+        });
+        restoredDowntimes = created.count;
+      }
+
+      return {
+        dailyAssignments,
+        weeklyStatuses,
+        weeklyShiftStatuses,
+        staffingRequirements,
+        machineDowntimeShifts,
+        machineDowntimes,
+        restoredLeaves,
+        restoredDowntimes,
+      };
+    });
+
+    res.json({
+      ok: true,
+      deleted: {
+        daily_assignments: result.dailyAssignments.count,
+        weekly_employee_statuses: result.weeklyStatuses.count,
+        weekly_employee_shift_statuses: result.weeklyShiftStatuses.count,
+        machine_staffing_requirements: result.staffingRequirements.count,
+        machine_downtime_shifts: result.machineDowntimeShifts.count,
+        machine_downtimes: result.machineDowntimes.count,
+      },
+      restored: {
+        default_leaves: result.restoredLeaves,
+        default_machine_downtimes: result.restoredDowntimes,
+      },
+    });
+  } catch (e) {
+    console.error('clear_month_planning_test', e);
+    res.status(500).json({ error: 'Failed to clear month planning' });
+  }
+});
+
+/**
+ * Deletes only machine/day work assignments (luxlait_daily_assignments) in the
+ * inclusive date range. Does not touch weekly employee statuses (congés, absences),
+ * staffing requirements, or machine downtimes. Manager or admin only.
+ */
+router.post('/luxlait_clear_work_assignments_range', async (req: Request, res: Response) => {
+  try {
+    if (!isAdminOrManager(req.userRoles)) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    const body = req.body as { fromDate?: string; toDate?: string };
+    const from = body?.fromDate;
+    const to = body?.toDate;
+    if (!from || !to) {
+      res.status(400).json({ error: 'fromDate and toDate are required' });
+      return;
+    }
+
+    const fromD = parseYYYYMMDD(from);
+    const toD = parseYYYYMMDD(to);
+    if (fromD > toD) {
+      res.status(400).json({ error: 'fromDate must be on or before toDate' });
+      return;
+    }
+
+    const range = { gte: fromD, lte: toD };
+    const result = await prisma.luxlaitDailyAssignment.deleteMany({
+      where: { dayDate: range },
+    });
+
+    res.json({
+      ok: true,
+      deleted_assignments: result.count,
+    });
+  } catch (e) {
+    console.error('luxlait_clear_work_assignments_range', e);
+    res.status(500).json({ error: 'Failed to clear work assignments' });
+  }
+});
 
 router.post('/luxlait_daily_assignments', async (req: Request, res: Response) => {
   try {
@@ -262,18 +700,45 @@ router.post('/luxlait_daily_assignments', async (req: Request, res: Response) =>
       time_slot_id: string | null;
     };
 
-    const created = await prisma.luxlaitDailyAssignment.create({
+    const rowId = randomUUID();
+    const insertedRows = await prisma.$queryRawUnsafe<Array<{
+      id: string;
+      day_date: Date;
+      employee_id: string;
+      machine_id: string;
+      time_slot_id: string | null;
+      created_at: Date;
+    }>>(
+      `INSERT INTO luxlait_daily_assignments (id, day_date, employee_id, machine_id, time_slot_id)
+       VALUES ($1::uuid, $2::date, $3::uuid, $4::uuid, $5::uuid)
+       RETURNING id, day_date, employee_id, machine_id, time_slot_id, created_at`,
+      rowId,
+      body.day_date,
+      body.employee_id,
+      body.machine_id,
+      body.time_slot_id ?? null
+    );
+
+    if (!insertedRows.length) {
+      res.status(400).json({ error: 'Invalid employee_id for daily assignment' });
+      return;
+    }
+
+    const created = insertedRows[0];
+    res.json({
       data: {
-        dayDate: parseYYYYMMDD(body.day_date),
-        employeeId: body.employee_id,
-        machineId: body.machine_id,
-        timeSlotId: body.time_slot_id ?? null,
+        id: created.id,
+        day_date: toYYYYMMDD(new Date(created.day_date)),
+        employee_id: created.employee_id,
+        machine_id: created.machine_id,
+        time_slot_id: created.time_slot_id,
+        created_at: toYYYYMMDD(new Date(created.created_at)),
       },
     });
-
-    res.json({ data: mapDailyAssignment(created) });
-  } catch {
-    res.status(500).json({ error: 'Failed to create daily assignment' });
+  } catch (err) {
+    console.error('Failed to create daily assignment:', err);
+    const detail = err instanceof Error ? err.message : undefined;
+    res.status(500).json({ error: 'Failed to create daily assignment', detail });
   }
 });
 
@@ -293,8 +758,7 @@ router.post('/luxlait_daily_assignments/upsert', async (req: Request, res: Respo
     // Prisma can't do true bulk upsert; upsert per row using the unique(day_date,employee_id) constraint.
     await prisma.$transaction(
       rows.map((r) =>
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (prisma.luxlaitDailyAssignment as any).upsert({
+        prisma.luxlaitDailyAssignment.upsert({
           where: {
             dayDate_employeeId: {
               dayDate: parseYYYYMMDD(r.day_date),
@@ -360,18 +824,15 @@ router.post('/luxlait_daily_assignments/bulk_upsert', async (req: Request, res: 
         r.day_date,
         r.employee_id,
         r.machine_id,
-        r.time_slot_id || null,
+        r.time_slot_id ?? null,
       ]);
 
       await prisma.$executeRawUnsafe(
-        `INSERT INTO luxlait_daily_assignments (id, day_date, employee_id, machine_id, time_slot_id, team_id)
-         SELECT v.id, v.day_date, v.employee_id, v.machine_id, v.time_slot_id, e.default_team_id
-         FROM (VALUES ${values.join(', ')}) AS v(id, day_date, employee_id, machine_id, time_slot_id)
-         INNER JOIN luxlait_employees e ON e.id = v.employee_id
+        `INSERT INTO luxlait_daily_assignments (id, day_date, employee_id, machine_id, time_slot_id)
+         VALUES ${values.join(', ')}
          ON CONFLICT (day_date, employee_id)
          DO UPDATE SET machine_id = EXCLUDED.machine_id,
-                       time_slot_id = EXCLUDED.time_slot_id,
-                       team_id = EXCLUDED.team_id`,
+                       time_slot_id = EXCLUDED.time_slot_id`,
         ...params
       );
     }
@@ -524,6 +985,71 @@ router.post('/luxlait_weekly_employee_statuses/bulk_sync', async (req: Request, 
   } catch (e) {
     console.error('luxlait_weekly_employee_statuses/bulk_sync', e);
     res.status(500).json({ error: 'Failed to bulk sync weekly employee statuses' });
+  }
+});
+
+router.post('/luxlait_weekly_employee_shift_statuses/bulk_sync', async (req: Request, res: Response) => {
+  try {
+    if (!isAdminOrManager(req.userRoles)) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    const body = req.body as {
+      rows?: Array<{ employee_id: string; day_date: string; time_slot_id: string; status_id: string | null }>;
+    };
+    const rows = Array.isArray(body?.rows) ? body.rows : [];
+    if (rows.length === 0) {
+      res.json({ ok: true, count: 0 });
+      return;
+    }
+
+    const deduped = new Map<string, { employee_id: string; day_date: string; time_slot_id: string; status_id: string | null }>();
+    for (const r of rows) {
+      if (!r?.employee_id || !r?.day_date || !r?.time_slot_id) continue;
+      deduped.set(`${r.employee_id}|${r.day_date}|${r.time_slot_id}`, {
+        employee_id: r.employee_id,
+        day_date: r.day_date,
+        time_slot_id: r.time_slot_id,
+        status_id: r.status_id ?? null,
+      });
+    }
+    const list = [...deduped.values()];
+    const CHUNK = 80;
+    for (let i = 0; i < list.length; i += CHUNK) {
+      const chunk = list.slice(i, i + CHUNK);
+      await prisma.$transaction(
+        chunk.map((r) => {
+          const day = parseYYYYMMDD(r.day_date);
+          if (r.status_id === null || r.status_id === '') {
+            return prisma.luxlaitWeeklyEmployeeShiftStatus.deleteMany({
+              where: { employeeId: r.employee_id, dayDate: day, timeSlotId: r.time_slot_id },
+            });
+          }
+          return prisma.luxlaitWeeklyEmployeeShiftStatus.upsert({
+            where: {
+              dayDate_employeeId_timeSlotId: {
+                dayDate: day,
+                employeeId: r.employee_id,
+                timeSlotId: r.time_slot_id,
+              },
+            },
+            create: {
+              employeeId: r.employee_id,
+              dayDate: day,
+              timeSlotId: r.time_slot_id,
+              statusId: r.status_id,
+            },
+            update: { statusId: r.status_id },
+          });
+        })
+      );
+    }
+
+    res.json({ ok: true, count: list.length });
+  } catch (e) {
+    console.error('luxlait_weekly_employee_shift_statuses/bulk_sync', e);
+    res.status(500).json({ error: 'Failed to bulk sync weekly employee shift statuses' });
   }
 });
 
@@ -771,6 +1297,126 @@ router.delete('/luxlait_machine_downtimes/:id', async (req: Request, res: Respon
     res.json({ ok: true });
   } catch {
     res.status(500).json({ error: 'Failed to delete machine downtime' });
+  }
+});
+
+router.get('/luxlait_machine_downtime_shifts', async (req: Request, res: Response) => {
+  try {
+    const from = (req.query.fromDate ?? req.query.from) as string | undefined;
+    const to = (req.query.toDate ?? req.query.to) as string | undefined;
+    const where =
+      from && to
+        ? { dayDate: { gte: parseYYYYMMDD(from), lte: parseYYYYMMDD(to) } }
+        : undefined;
+
+    const rows = await prisma.luxlaitMachineDowntimeShift.findMany({
+      where,
+      orderBy: [{ machineId: 'asc' }, { dayDate: 'asc' }, { timeSlotId: 'asc' }],
+    });
+    res.json(rows.map(mapMachineDowntimeShift));
+  } catch {
+    res.status(500).json({ error: 'Failed to fetch machine downtime shifts' });
+  }
+});
+
+router.post('/luxlait_machine_downtime_shifts/bulk_sync', async (req: Request, res: Response) => {
+  try {
+    if (!isAdminOrManager(req.userRoles)) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+    const body = req.body as {
+      rows?: Array<{ machine_id: string; day_date: string; time_slot_id: string; reason?: string | null }>;
+    };
+    const rows = Array.isArray(body?.rows) ? body.rows : [];
+    const deduped = new Map<string, { machine_id: string; day_date: string; time_slot_id: string; reason?: string | null }>();
+    for (const r of rows) {
+      if (!r?.machine_id || !r?.day_date || !r?.time_slot_id) continue;
+      deduped.set(`${r.machine_id}|${r.day_date}|${r.time_slot_id}`, r);
+    }
+    const list = [...deduped.values()];
+
+    await prisma.$transaction(async (tx) => {
+      const byMachine = new Map<string, Set<string>>();
+      for (const row of list) {
+        if (!byMachine.has(row.machine_id)) byMachine.set(row.machine_id, new Set());
+        byMachine.get(row.machine_id)!.add(`${row.day_date}|${row.time_slot_id}`);
+      }
+      for (const [machineId] of byMachine) {
+        await tx.luxlaitMachineDowntimeShift.deleteMany({ where: { machineId } });
+      }
+      if (list.length) {
+        await tx.luxlaitMachineDowntimeShift.createMany({
+          data: list.map((row) => ({
+            machineId: row.machine_id,
+            dayDate: parseYYYYMMDD(row.day_date),
+            timeSlotId: row.time_slot_id,
+            reason: row.reason ?? null,
+          })),
+          skipDuplicates: true,
+        });
+      }
+    });
+
+    res.json({ ok: true, count: list.length });
+  } catch {
+    res.status(500).json({ error: 'Failed to bulk sync machine downtime shifts' });
+  }
+});
+
+router.get('/luxlait_machine_staffing_requirements', async (req: Request, res: Response) => {
+  try {
+    const rows = await prisma.luxlaitMachineStaffingRequirement.findMany({
+      where: { dayDate: GLOBAL_SHIFT_MIN_DATE },
+      orderBy: [{ machineId: 'asc' }, { timeSlotId: 'asc' }],
+    });
+    res.json(rows.map(mapMachineStaffingRequirement));
+  } catch {
+    res.status(500).json({ error: 'Failed to fetch machine staffing requirements' });
+  }
+});
+
+router.post('/luxlait_machine_staffing_requirements/bulk_sync', async (req: Request, res: Response) => {
+  try {
+    if (!isAdminOrManager(req.userRoles)) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+    const body = req.body as {
+      rows?: Array<{ machine_id: string; time_slot_id: string; min_employees: number }>;
+    };
+    const rows = Array.isArray(body?.rows) ? body.rows : [];
+    const deduped = new Map<string, { machine_id: string; time_slot_id: string; min_employees: number }>();
+    for (const r of rows) {
+      if (!r?.machine_id || !r?.time_slot_id) continue;
+      deduped.set(`${r.machine_id}|${r.time_slot_id}`, {
+        machine_id: r.machine_id,
+        time_slot_id: r.time_slot_id,
+        min_employees: Math.max(0, Number(r.min_employees) || 0),
+      });
+    }
+    const list = [...deduped.values()];
+    if (list.length === 0) {
+      res.json({ ok: true, count: 0 });
+      return;
+    }
+    await prisma.$transaction(async (tx) => {
+      const machineIds = [...new Set(list.map((r) => r.machine_id))];
+      await tx.luxlaitMachineStaffingRequirement.deleteMany({ where: { machineId: { in: machineIds } } });
+      await tx.luxlaitMachineStaffingRequirement.createMany({
+        data: list.map((r) => ({
+          machineId: r.machine_id,
+          dayDate: GLOBAL_SHIFT_MIN_DATE,
+          timeSlotId: r.time_slot_id,
+          minEmployees: r.min_employees,
+        })),
+        skipDuplicates: true,
+      });
+    });
+
+    res.json({ ok: true, count: list.length });
+  } catch {
+    res.status(500).json({ error: 'Failed to bulk sync machine staffing requirements' });
   }
 });
 

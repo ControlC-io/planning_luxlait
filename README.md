@@ -1,772 +1,356 @@
-# MyRTest - Secure DMZ Architecture
+# Luxlait Planning
 
-A secure multi tier application implementing network segmentation with separate DMZ and internal networks using Docker Compose. Requirements and auth design: see [new_requisites.md](new_requisites.md) and [auth_spec.md](auth_spec.md).
+Luxlait Planning is a workforce scheduling application for the dairy plant. It
+covers the full operations cycle: machine catalogue, employee skill matrix
+(polyvalence), shift openings and closures, planned downtimes, leaves catalogue,
+weekly and daily assignments, and an automatic planner that calls a CP SAT
+solver (Google OR Tools) to propose valid plannings under a configurable set of
+hard, soft and preference constraints.
 
-## Using this template
+The stack is fully containerised through Docker Compose, with strict network
+segmentation between the DMZ (frontend + reverse proxy) and the internal
+network (backend, database, email service, solver service).
 
-1. Clone the repository.
-2. Copy `.env.example` to `.env` and fill in values (no real secrets in the repo).
-3. Optionally replace the project name "MyRTest" and database name `myrtest` with your own.
-4. Follow **Quick Start** below to run with Docker.
-
-## Architecture Overview
-
-This project implements a secure DMZ (Demilitarized Zone) architecture with two isolated networks and multiple services:
-
-### DMZ Network (`dmz_net`)
-* **NGINX Reverse Proxy** (`reverse_proxy`): Entry point, handles routing, health checks and SSL termination
-* **Main Frontend** (`main_frontend_app`): React/Vite app for end users (Home, Login, Register, Dashboard, Counter, 2FA)
-* **Admin Frontend** (`admin_frontend_app`): React/Vite admin panel (Settings, Audit Logs, Database view, User Roles placeholder)
-
-### Internal Network (`internal_net`)
-* **Express Backend** (`backend_api`): Business logic, authentication, RBAC and database access
-* **PostgreSQL Database** (`database`): Stores users, sessions, roles, feature flags, audit logs, etc.
-* **Email Service** (`email_service`): Dedicated microservice that sends 2FA (OTP) emails via SendGrid
-
-## Key Features
-
-* **Network Isolation**: Frontends in the DMZ never touch the database directly; they only talk to the backend
-* **Dynamic Authentication**: Better Auth with database‑driven provider configuration stored in `system_settings`
-* **JWT + Sessions**: Session cookies for Better Auth, plus JWT Bearer tokens for protected API routes
-* **Two‑Factor Authentication (2FA)**: TOTP via Better Auth plugin and optional email‑OTP via the `email_service`
-* **Role Based Access Control (RBAC)**: `Role`, `UserRole` and `RoleEndpointMapping` models controlling access per endpoint
-* **Counter Test Feature**: A persisted counter API used by the Main Frontend to prove centralized JWT + RBAC enforcement
-* **Audit Logging**: `AuditLog` table with hooks for sign‑in / sign‑up / sign‑out and admin operations
-* **API Documentation**: OpenAPI/Swagger UI served at `/api/docs`
-* **Type Safety**: Full TypeScript support across frontend and backend
-* **Modern Stack**: React + Vite, Express, Prisma ORM, Docker, NGINX
-* **Feature Flags**: `SystemSettings` model for runtime configuration
-
-## Compliance with new_requisites.md
-
-This section maps each requirement from [new_requisites.md](new_requisites.md) to the current implementation.
-
-### 1. Backend and Security — Implemented
-
-| Requirement | Status | Implementation |
-|-------------|--------|-----------------|
-| **Centralized Middleware** | Done | Single [jwtAuth](backend/src/middleware/jwtAuth.ts) middleware; all non-public routes require JWT. Admin API uses [adminAuth](backend/src/middleware/adminAuth.ts) with `x-admin-secret`. No per-endpoint auth logic. |
-| **JWT Authentication** | Done | Backend validates Bearer JWT in `jwtAuth`, verifies identity and attaches `req.user`; session-based Better Auth is used only for login/register, then JWT is issued for API access. |
-| **API Documentation** | Done | OpenAPI/Swagger at `GET /api/docs` ([swagger.ts](backend/src/lib/swagger.ts)); routes documented with JSDoc. |
-
-### 2. Frontend Separation and Testing — Implemented
-
-| Requirement | Status | Implementation |
-|-------------|--------|-----------------|
-| **App Split** | Done | Two apps: [main_frontend](main_frontend/) (port 5173 / behind nginx 80) and [admin_frontend](admin_frontend/) (port 5174 / behind nginx 8080). |
-| **Counter Test Feature** | Done | [Counter](main_frontend/src/components/Counter.tsx) in Main Frontend calls `GET/POST /api/counter` and [counter routes](backend/src/routes/counter.ts) persist value in `SystemSettings`. |
-| **Protected UI** | Done | Counter sends `Authorization: Bearer <JWT>`; without a valid JWT (or with insufficient role) the API returns 401/403, proving centralized middleware enforcement. |
-
-### 3. Role Based Access Control (RBAC) — Backend done; Admin UI placeholder
-
-| Requirement | Status | Implementation |
-|-------------|--------|-----------------|
-| **Role Management** | Backend done | Full CRUD in [roles.ts](backend/src/routes/roles.ts): `GET/POST/DELETE /api/admin/roles`. Admin App has a **User Roles** tab that is still a **placeholder** (static data, no API calls). |
-| **Specific Roles** | Done | Roles "Admin User" and "Manager" are created by the [seed script](backend/src/scripts/seed.ts). You can also create more via API or future Admin UI. |
-| **Endpoint Mapping** | Backend done | [RoleEndpointMapping](backend/prisma/schema.prisma) and API: `GET/POST/DELETE /api/admin/roles/:id/endpoints`. No UI in Admin App yet to configure which endpoints each role can access. |
-| **User Assignment** | Backend done | `POST /api/admin/users/:id/roles`, `DELETE /api/admin/users/:id/roles/:roleId`. No UI in Admin App yet to assign/revoke roles per user. |
-
-RBAC is enforced: [jwtAuth](backend/src/middleware/jwtAuth.ts) checks `RoleEndpointMapping` before allowing access. To manage roles and assignments today, use the API (e.g. via Swagger at `/api/docs`) or Prisma Studio.
-
-### 4. Two Factor Authentication (2FA) and Infrastructure — Implemented
-
-| Requirement | Status | Implementation |
-|-------------|--------|-----------------|
-| **Email 2FA** | Done | Flow: `POST /api/auth/token` (if user has `twoFactorEnabled`) returns `requires2FA` and sends OTP via [email_service](email_service/); client calls `POST /api/auth/verify-otp` with code to get JWT. [auth routes](backend/src/routes/auth.ts), [EmailOtpChallenge](main_frontend/src/pages/EmailOtpChallenge.tsx). |
-| **SendGrid Integration** | Done | [email_service](email_service/src/index.ts) uses `@sendgrid/mail`; OTP emails sent from `SENDGRID_FROM_EMAIL`. |
-| **Dedicated Docker Service** | Done | [email_service](email_service/) runs as its own container in [docker-compose.yml](docker-compose.yml); backend calls it via `EMAIL_SERVICE_URL`. |
-| **Secret Management** | Done | SendGrid key and config in `.env` only; [.gitignore](.gitignore) excludes `.env`; [.env.example](.env.example) documents variables without real secrets. |
-
-## Quick Start Guide
-
-```bash
-# 1. Start all services
-docker-compose up --build -d
-
-# 2. Wait 30 seconds for initialization
-
-# 3. Initialize database schema (first time only)
-cd backend
-npx prisma db push
-cd ..
-
-# 4. Seed auth configuration (first time only)
-docker exec backend_api npm run seed
-
-# 5. Open browser
-# Visit: http://localhost
-# Click "Create Account" and register
-```
-
-## Common Commands
-
-```bash
-# View all users and sessions
-docker exec backend_api npm run test:auth
-
-# Open database GUI (Prisma Studio)
-docker exec -it backend_api npx prisma studio
-# Then visit: http://localhost:5555
-
-# View logs
-docker logs backend_api -f
-
-# Restart a service
-docker-compose restart backend
-
-# Stop everything
-docker-compose down
-
-# Reset database (deletes all data)
-docker-compose down -v && docker-compose up -d
-```
-
-## Local Development (Backend and Frontends on Your Machine)
-
-Use this flow when you want to run the backend and frontends on your host (e.g. on Windows, to avoid Prisma engine issues when using Docker for the backend).
-
-**Requirements:** Node.js 20+, PostgreSQL reachable at `localhost:5432` (you can run only the database with Docker).
-
-### First Time Setup
-
-1. **Start only the database** (from the project root):
-
-   ```bash
-   docker-compose up -d postgres
-   ```
-
-   (Or use a local PostgreSQL instance with user `postgres`, password `postgres`, database `myrtest`.)
-
-2. **Backend: schema and seed data**
-
-   ```bash
-   cd backend
-   npx prisma db push
-   npm run seed
-   ```
-
-3. **Frontends:** no special first time steps required.
-
-### Every Time You Start Everything
-
-1. **Database:** if you use Docker only for Postgres:
-
-   ```bash
-   docker-compose up -d postgres
-   ```
-
-2. **Backend** (terminal 1):
-
-   ```bash
-   cd backend
-   npm run dev
-   ```
-
-   It should be running at `http://localhost:3000`.
-
-3. **Main Frontend** (terminal 2):
-
-   ```bash
-   cd main_frontend
-   npm install
-   npm run dev
-   ```
-
-   It will be available at `http://localhost:5173`.
-
-4. **Admin Frontend** (terminal 3):
-
-   ```bash
-   cd admin_frontend
-   npm install
-   npm run dev
-   ```
-
-   By default it runs on `http://localhost:5174`. When using Docker/nginx you typically access it via `http://localhost:8080` instead.
-
-5. **Use the app:** open **http://localhost:5173** in your browser for the Main Frontend, and **http://localhost:8080** for the Admin panel when running via Docker/nginx.
-
-### Environment Variables
-
-- **Root `.env` (backend + infrastructure):** see `.env.example` for all required variables such as `DATABASE_URL`, `ADMIN_SECRET`, `JWT_SECRET`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `TRUSTED_ORIGINS`, `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL`, `EMAIL_SERVICE_SECRET`, `EMAIL_SERVICE_URL`, etc. **Do not commit real secrets; use `.env.example` as a template.**
-- **Admin Frontend:** `admin_frontend/.env` (or `.env.local`) with:
-  - `VITE_API_URL` (optional). When running behind nginx (`http://localhost:8080`), you can leave it empty to use relative `/api` calls. For direct dev against the backend without nginx, set `VITE_API_URL=http://localhost:3000`.
-  - `VITE_ADMIN_SECRET` which must match `ADMIN_SECRET` in the backend `.env`.
-
-## Project Structure
+## Architecture
 
 ```text
-myrtest/
+                     ┌─────────────────────────────────────────┐
+                     │              dmz_net (public)            │
+                     │                                          │
+   user (browser) ──▶│  reverse_proxy (nginx)  ──▶ frontend     │
+                     │           │                              │
+                     └───────────┼──────────────────────────────┘
+                                 │ /api  (proxied only)
+                     ┌───────────┴──────────────────────────────┐
+                     │            internal_net (private)        │
+                     │                                          │
+                     │   backend_api (Express + Prisma)         │
+                     │        │            │            │       │
+                     │        ▼            ▼            ▼       │
+                     │   database   email_service  solver_service │
+                     │  (Postgres)   (SendGrid)    (FastAPI + OR Tools) │
+                     └──────────────────────────────────────────┘
+```
+
+| Service | Network | Role |
+|---------|---------|------|
+| `nginx` (`reverse_proxy`) | `dmz_net` + `internal_net` | TLS termination, routes `/` to the SPA, `/api/*` to the backend, exposes ports `80` and `443`. |
+| `frontend` (`frontend_app`) | `dmz_net` | React 18 + Vite + Tailwind SPA. Login flow, planning grid, admin pages (employees, machines, skills, closures, leaves, constraints). |
+| `backend` (`backend_api`) | `internal_net` | Express + TypeScript API. Better Auth for sessions, JWT for protected API calls, RBAC, planning endpoints, autoplan orchestration, Swagger UI. |
+| `postgres` (`database`) | `internal_net` | PostgreSQL 16. Better Auth tables, RBAC, Luxlait planning tables, solver constraints catalogue, audit logs. |
+| `email_service` | `internal_net` | Express microservice. Sends 2FA OTP emails through SendGrid. |
+| `solver_service` | `internal_net` | FastAPI + OR Tools (CP SAT) microservice. Receives a planning model and returns assignment proposals. |
+
+The frontend container never touches the database directly; all writes go
+through the backend on the internal network.
+
+## Tech stack
+
+* **Frontend**: React 18, Vite 5, TypeScript 5.6, Tailwind CSS, React Router 7,
+  Zustand, TanStack Query, Better Auth client.
+* **Backend**: Node 20, Express 4, TypeScript 5.3, Prisma 5 (PostgreSQL),
+  Better Auth 1.4 with Two Factor plugin, JWT, bcryptjs, Swagger UI.
+* **Solver**: Python 3.12, FastAPI 0.115, Pydantic 2, Google OR Tools 9.11
+  (CP SAT).
+* **Email**: Express + `@sendgrid/mail`.
+* **Infrastructure**: Docker, Docker Compose, NGINX 1.x.
+* **Database**: PostgreSQL 16.
+
+## Repository layout
+
+```text
+luxlait/
 ├── backend/
-│   ├── src/
-│   │   ├── index.ts              # Express server entry point (health, auth, JWT, admin, counter)
-│   │   ├── lib/
-│   │   │   ├── auth.ts           # Better Auth configuration + dynamic config loader
-│   │   │   ├── emailService.ts   # HTTP client to the email_service (2FA OTP)
-│   │   │   └── swagger.ts        # Swagger/OpenAPI spec builder
-│   │   ├── middleware/
-│   │   │   ├── jwtAuth.ts        # Centralized JWT + RBAC middleware
-│   │   │   ├── adminAuth.ts      # x-admin-secret admin guard
-│   │   │   └── auditLog.ts       # Helper to write AuditLog entries
-│   │   ├── routes/
-│   │   │   ├── auth.ts           # JWT issuance + email OTP 2FA endpoints
-│   │   │   ├── counter.ts        # Counter feature (protected by JWT/RBAC)
-│   │   │   ├── admin.ts          # Admin settings, database overview, audit logs
-│   │   │   └── roles.ts          # RBAC: roles, endpoint mappings, user-role assignment
-│   │   └── scripts/
-│   │       ├── seed.ts           # Seed auth and system settings
-│   │       └── test-auth.ts      # Test users and sessions
 │   ├── prisma/
-│   │   └── schema.prisma         # Database schema (users, roles, audit_logs, etc.)
-│   ├── package.json
-│   ├── tsconfig.json
-│   └── Dockerfile
-├── main_frontend/
+│   │   ├── schema.prisma            # Better Auth + RBAC + Luxlait + solver constraints
+│   │   └── migrations/              # SQL migrations including solver constraints seed
 │   ├── src/
-│   │   ├── main.tsx              # React entry point
-│   │   ├── App.tsx               # Routes: Home, Login, Register, Dashboard, 2FA flows
-│   │   ├── contexts/
-│   │   │   └── AuthContext.tsx   # Auth state, Better Auth client, JWT handling
-│   │   ├── components/
-│   │   │   ├── Navbar.tsx        # Main navigation (with link to Admin panel)
-│   │   │   ├── LoginForm.tsx     # Login form with 2FA hooks
-│   │   │   ├── RegisterForm.tsx  # Register form
-│   │   │   └── Counter.tsx       # Counter UI hitting /api/counter endpoints
-│   │   ├── pages/
-│   │   │   ├── Home.tsx
-│   │   │   ├── Login.tsx
-│   │   │   ├── Register.tsx
-│   │   │   ├── Dashboard.tsx
-│   │   │   ├── TwoFactorChallenge.tsx   # TOTP 2FA flow
-│   │   │   └── EmailOtpChallenge.tsx    # Email OTP 2FA flow
-│   │   └── index.css             # Tailwind styles
-│   ├── package.json
-│   ├── vite.config.ts
-│   ├── tsconfig.json
+│   │   ├── index.ts                 # Express server, route mounts
+│   │   ├── lib/                     # auth (Better Auth), prisma client, swagger, RBAC, email client
+│   │   ├── middleware/              # jwtAuth (centralised JWT + RBAC), adminAuth, auditLog
+│   │   ├── routes/                  # auth, betterAuthProxy, admin, roles, counter, planning, autoplan, solverConstraints
+│   │   └── scripts/
+│   │       ├── bootstrap.ts         # Production bootstrap orchestrator (run by docker-entrypoint.sh)
+│   │       ├── seed.ts              # SystemSettings + RBAC roles + planning endpoint mappings
+│   │       ├── seed-admin.ts        # Provision the admin user via Better Auth
+│   │       ├── seed-luxlait-real.ts # Real Luxlait reference data (machines, employees, skills, shifts, leaves)
+│   │       ├── seed-planning.ts     # Demo planning data (development only)
+│   │       └── test-auth.ts         # Inspect users, sessions, system settings
+│   ├── docker-entrypoint.sh         # prisma generate + migrate deploy + bootstrap.ts
 │   └── Dockerfile
-├── admin_frontend/
+├── frontend/
 │   ├── src/
-│   │   ├── main.tsx              # React entry point
-│   │   ├── App.tsx               # Routing + ProtectedRoute wrapper
-│   │   ├── contexts/
-│   │   │   └── AuthContext.tsx   # Admin-side auth using Better Auth
-│   │   ├── components/
-│   │   │   ├── ProtectedRoute.tsx
-│   │   │   ├── SettingsTab.tsx   # SystemSettings editor (feature flags, auth config)
-│   │   │   ├── LogsTab.tsx       # Audit logs table
-│   │   │   └── DatabaseTab.tsx   # Database table counts and redacted views
-│   │   ├── pages/
-│   │   │   └── AdminDashboard.tsx # Tabs: Settings, Audit Logs, Database, User Roles (placeholder)
-│   │   └── index.css
-│   ├── package.json
-│   ├── vite.config.ts
-│   ├── tsconfig.json
+│   │   ├── App.tsx                  # Routes (planning, login, 2FA challenges, demo mode)
+│   │   ├── pages/                   # LuxlaitApp, admin pages, auth pages
+│   │   ├── features/planning/       # Planning grid views, cells, modals
+│   │   ├── components/              # RequireAuth, layout, admin shells
+│   │   ├── context/                 # PlanningDataContext, DemoModeContext
+│   │   └── lib/                     # api (Better Auth client + fetch wrapper), planningApi, helpers
+│   └── Dockerfile
+├── solver_service/
+│   ├── app.py                       # FastAPI app, POST /solve, GET /health
+│   ├── solver.py                    # CP SAT model (OR Tools)
+│   ├── models.py                    # Pydantic request/response schemas
+│   ├── requirements.txt
 │   └── Dockerfile
 ├── email_service/
-│   ├── src/
-│   │   └── index.ts              # Express microservice, /send-otp via SendGrid
-│   ├── package.json
-│   ├── tsconfig.json
+│   ├── src/index.ts                 # Express microservice, POST /send-otp via SendGrid
 │   └── Dockerfile
 ├── nginx/
-│   └── nginx.conf                # Reverse proxy configuration (port 80 + 8080)
-├── docker-compose.yml            # Multi-container orchestration (backend, DB, frontends, email, nginx)
-├── .env                          # Environment variables (not committed; see .env.example)
-├── .env.example                  # Example configuration without real secrets
-└── README.md                     # This file
+│   └── nginx.conf                   # Reverse proxy: / -> frontend, /api -> backend
+├── docker-compose.yml               # Orchestration of the 6 services
+├── .env.example                     # Reference for all environment variables
+├── architecture.md                  # Network topology specification
+├── auth_spec.md                     # Dynamic authentication design
+└── README.md                        # This file
 ```
 
-## Getting Started
+## Prerequisites
 
-### Prerequisites
+* Docker 24+ and Docker Compose v2 (i.e. `docker compose` as a subcommand).
+* About 4 GB of free RAM.
+* Optional: Node.js 20+ if you want to run scripts on the host (Prisma CLI,
+  ad hoc seeds, etc).
 
-* Docker and Docker Compose installed
-* Node.js 20+ (optional, only for local development outside Docker)
-
-### Quick Start (Recommended)
-
-**Step 1: Configure Environment**
-
-The `.env` file is already created with default values. For production, update:
-* `BETTER_AUTH_SECRET`: Generate with `openssl rand -base64 32`
-
-**Step 2: Start All Services**
-
-From the project root:
-```bash
-# Build and start all containers
-docker-compose up --build -d
-
-# Wait about 30 seconds for services to initialize
-```
-
-**Step 3: Initialize Database Schema**
+## Quick start
 
 ```bash
-# Push the Prisma schema to the database
-cd backend
-npx prisma db push
+# 1. Copy and edit environment variables
+cp .env.example .env
+# At a minimum set: ADMIN_EMAIL, ADMIN_PASSWORD, ADMIN_NAME, JWT_SECRET,
+# BETTER_AUTH_SECRET, ADMIN_SECRET, EMAIL_SERVICE_SECRET, SOLVER_SERVICE_SECRET,
+# POSTGRES_PASSWORD and DATABASE_URL.
 
-# Seed authentication configuration
-cd ..
-docker exec backend_api npm run seed
+# 2. Build and start the full stack
+docker compose up --build -d
+
+# 3. Watch the bootstrap finish
+docker compose logs -f backend
+# Expect: "===== Bootstrap completed in <ms> ms ====="
+
+# 4. Open the app
+open http://localhost
+# Sign in with ADMIN_EMAIL / ADMIN_PASSWORD from .env
 ```
 
-**Step 4: Access the Application**
+The backend container automatically applies Prisma migrations and runs the
+production bootstrap on startup. On a fresh database it provisions the admin
+account, RBAC roles, system settings and the Luxlait reference data. On
+subsequent boots every step is a no op since data already exists.
 
-Open your browser and visit: **http://localhost**
+## Production VM bootstrap
 
-You should see the home page with "Sign In" and "Create Account" buttons.
+`backend/docker-entrypoint.sh` runs the following sequence each time the
+backend container starts:
 
-**Step 5: Create Your First User**
+1. `npx prisma generate` regenerates the Prisma client.
+2. `npx prisma migrate deploy` applies any pending SQL migrations. The
+   migration `20260508120000_add_solver_constraints` also seeds the 22 solver
+   constraints catalogue (legal, safety, production, RH, preferences).
+3. `npx ts-node src/scripts/bootstrap.ts` runs the production bootstrap when
+   `BOOTSTRAP_ON_BOOT=true` (the default).
+4. The Express API starts (`npm run dev` in development, `npm start` if you
+   replace the CMD with the compiled build).
 
-1. Click **"Create Account"**
-2. Fill in the form (name, email, password min 8 chars)
-3. Click **"Create Account"**
-4. You will be automatically logged in and redirected to the Dashboard
+The bootstrap orchestrates five idempotent stages:
 
-Done! Your DMZ architecture with authentication is now running.
+| Stage | Action | When it acts |
+|-------|--------|--------------|
+| `seedAuthSettings` | Inserts `auth_email_password_enabled`, `auth_google_enabled`, `auth_github_enabled`. | Inserts only the missing keys. |
+| `seedRoles` | Creates the RBAC roles `Admin User` and `Manager`. | Inserts only the missing roles. |
+| `seedAdmin` | Creates the admin user via Better Auth (`POST /sign-up/email`), forces `emailVerified=true`, attaches the `Admin User` role and creates the `LuxlaitProfile`. | Skips creation if a user with `ADMIN_EMAIL` already exists. The password is **never** overwritten; only role, profile and verified flag are repaired. |
+| `seedPlanningRbac` | Inserts the `* /api/planning` endpoint mappings for both roles, then assigns the `Manager` role to every existing non admin user. | Idempotent upserts. |
+| `seedLuxlaitReal({ skipIfPopulated: true })` | Inserts 8 machines, 35 employees, 3 time slots (Matin, Après midi, Nuit), 1 leave status, 98 skills, 24 open shifts, 1590 weekly closed shifts (recurring all year), 24 global staffing requirements and the May 2026 leaves catalogue. | Runs **only** when both `luxlait_machines` and `luxlait_employees` are empty. Never purges existing data. |
 
-### Starting Services After First Setup
+`seedAdmin` validates the credentials at startup. If `ADMIN_EMAIL` is missing or
+`ADMIN_PASSWORD` is shorter than 8 characters the container exits with a clear
+error rather than starting in a half configured state.
 
-Once you've done the initial setup, you only need:
+Set `BOOTSTRAP_ON_BOOT=false` only when you want to skip the seeds, for
+example when restoring from a backup or running a manual recovery script.
+
+### Manual seed scripts
 
 ```bash
-# Start everything
-docker-compose up -d
+docker compose exec backend npm run seed:bootstrap
+# Replays the orchestrator the entrypoint runs (idempotent everywhere).
 
-# Or with rebuild if you changed code
-docker-compose up --build -d
+docker compose exec backend npm run seed:admin
+# Repairs only the admin user (creates from ADMIN_EMAIL / ADMIN_PASSWORD if
+# missing, then enforces role, profile and emailVerified).
+
+docker compose exec backend npm run seed
+# Re-runs the SystemSettings, RBAC roles and planning endpoint mappings only.
+
+docker compose exec backend npm run seed:luxlait
+# DESTRUCTIVE: purges every luxlait_* table and reloads the reference data.
+# Reserved for development. Never run on a production VM with real data.
+
+docker compose exec backend npm run seed:planning
+# Generates synthetic planning demo data (employees, skills, etc) for dev.
 ```
 
-### Development with Local Node Modules
-
-If you want to install dependencies locally (for IDE autocomplete, etc.):
+### Reset the database to a clean state
 
 ```bash
-# Install backend dependencies
-cd backend
-npm install
-
-# Install main frontend dependencies
-cd ../main_frontend
-npm install
-
-# Install admin frontend dependencies (optional)
-cd ../admin_frontend
-npm install
+docker compose down -v        # drops the postgres_data volume
+docker compose up --build -d  # entrypoint reapplies migrations + bootstrap
 ```
 
-Note: The containers use their own `node_modules` via Docker volumes, so local installation is optional and only for IDE support.
+## Environment variables
+
+`.env.example` is the source of truth. Every variable below must be present in
+`.env` before the first `docker compose up`.
+
+| Variable | Purpose |
+|----------|---------|
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | PostgreSQL credentials and database name. |
+| `DATABASE_URL` | Connection string used by Prisma. Use the docker service name `postgres` as host. |
+| `NODE_ENV` | `development` or `production`. |
+| `ADMIN_SECRET` | Shared secret guarding `/api/admin/*` endpoints (header `x-admin-secret`). |
+| `JWT_SECRET`, `JWT_EXPIRES_IN` | Signing key and lifetime for the API JWT. |
+| `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `TRUSTED_ORIGINS` | Better Auth session cookie encryption, public base URL and allowed origins. |
+| `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `ADMIN_NAME` | Initial admin account provisioned by the bootstrap. Change before deploying to a new VM. |
+| `BOOTSTRAP_ON_BOOT` | `true` (default) to run the bootstrap on container start. |
+| `EMAIL_SERVICE_URL`, `EMAIL_SERVICE_SECRET`, `EMAIL_SERVICE_PORT` | URL and shared secret between backend and `email_service`. |
+| `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL` | Used only by `email_service` to deliver OTP messages. |
+| `SOLVER_SERVICE_URL`, `SOLVER_SERVICE_SECRET` | URL and shared secret between backend and `solver_service`. |
+
+Generate strong secrets with:
 
-### Accessing the Application
-
-| Service | URL | Description |
-|---------|-----|-------------|
-| **Main Frontend** | http://localhost | Main application UI (Home/Login/Register/Dashboard/Counter/2FA) |
-| **Admin Frontend** | http://localhost:8080 | Admin panel (Settings, Audit Logs, Database, Roles placeholder) |
-| **Backend API** | http://localhost/api | API endpoints (auth, counter, admin, roles) |
-| **Health Check** | http://localhost/api/health | Backend health status (DB latency, service status) |
-| **NGINX Health** | http://localhost/nginx-health | Proxy health status |
-| **Prisma Studio** | http://localhost:5555 | Database GUI (after running command) |
-
-## Quick Verification Checklist
-
-After starting the stack, you can quickly confirm that everything is wired correctly with these steps:
-
-1. **Backend health:** Visit `http://localhost/api/health` and check that `status` is `ok` and `database.ok` is `true`.
-2. **Main app UI:** Visit `http://localhost`, register a user and log in; you should be redirected to the Dashboard.
-3. **Admin panel:** Visit `http://localhost:8080`, log in with an existing user and open the **Settings**, **Audit Logs** and **Database** tabs.
-4. **Counter feature:** From the main Dashboard, use the Counter controls; the values should persist and be reflected in the admin **Database** tab (`system_settings` key `counter`). Requests are protected by JWT + RBAC.
-5. **2FA Email (optional):** If `SENDGRID_API_KEY` and `EMAIL_SERVICE_SECRET` are configured, enable email 2FA for a user and verify you receive OTP codes and can complete login via the email challenge page.
-6. **API docs:** Visit `http://localhost/api/docs` to inspect and try the documented endpoints (auth, counter, admin, roles).
-
-### Docker Container Management
-
-**View Running Containers:**
-```bash
-docker ps
-```
-
-**View Logs:**
-```bash
-# All services (follow mode)
-docker-compose logs -f
-
-# Specific service
-docker logs backend_api -f
-docker logs main_frontend_app -f
-docker logs admin_frontend_app -f
-docker logs email_service -f
-docker logs reverse_proxy -f
-docker logs database -f
-
-# Last 50 lines
-docker logs backend_api --tail 50
-```
-
-**Stop Services:**
-```bash
-# Stop but keep data
-docker-compose down
-
-# Stop and remove all data (including database)
-docker-compose down -v
-```
-
-**Restart Services:**
-```bash
-# Restart all
-docker-compose restart
-
-# Restart specific service
-docker-compose restart backend
-docker-compose restart main_frontend
-docker-compose restart admin_frontend
-docker-compose restart email_service
-docker-compose restart nginx
-```
-
-**Rebuild After Code Changes:**
-```bash
-# Rebuild and restart specific service
-docker-compose up -d --build backend
-
-# Rebuild everything
-docker-compose up --build -d
-```
-
-## Database Schema
-
-### User Model
-Compatible with Better Auth, includes fields for email, name, OAuth providers.
-
-### SystemSettings Model
-Feature flag system for dynamic authentication configuration:
-* `settingKey`: Unique identifier (e.g., `auth_google_enabled`)
-* `isEnabled`: Boolean flag to enable/disable features
-* `providerConfig`: JSON field for additional configuration
-
-## Security Features
-
-* Network segmentation via Docker networks
-* No direct database access from DMZ
-* Security headers configured in NGINX
-* Environment variable based configuration
-* No hardcoded credentials
-
-## Testing Authentication
-
-### Initial Setup
-
-After starting the application for the first time, seed the authentication configuration:
-
-```bash
-docker exec backend_api npm run seed
-```
-
-This creates the SystemSettings records for auth providers (email/password enabled, OAuth disabled by default).
-
-### Creating Users via UI
-
-1. Visit http://localhost
-2. Click **Create Account**
-3. Fill in the registration form:
-   - Full Name: Your name
-   - Email: your@email.com
-   - Password: Min 8 characters
-   - Confirm Password: Same as above
-4. Click **Create Account**
-5. You will be automatically logged in and redirected to the Dashboard
-
-### Testing Authentication Flow
-
-**Register a New User:**
-```
-Visit: http://localhost/register
-Fill: Name, email, password
-Result: Auto login and redirect to dashboard
-```
-
-**Login with Existing User:**
-```
-Visit: http://localhost/login
-Fill: Email, password
-Result: Redirect to dashboard
-```
-
-**Access Protected Dashboard:**
-```
-Visit: http://localhost/dashboard
-If not logged in: Redirected to login
-If logged in: See user information and status
-```
-
-**Logout:**
-```
-Click: Logout button on dashboard
-Result: Session cleared, redirected to login
-```
-
-### Testing via Test Script
-
-Check database state and active sessions:
-
-```bash
-docker exec backend_api npm run test:auth
-```
-
-This script shows:
-- SystemSettings configuration
-- All users in the database
-- Active sessions
-
-### Testing Auth Endpoints Directly
-
-**Check Session (GET):**
-```bash
-curl -c cookies.txt http://localhost/api/auth/session
-```
-
-**Register (POST):**
-```bash
-curl -X POST http://localhost/api/auth/sign-up/email \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Test User","email":"test@example.com","password":"password123"}' \
-  -c cookies.txt
-```
-
-**Login (POST):**
-```bash
-curl -X POST http://localhost/api/auth/sign-in/email \
-  -H "Content-Type: application/json" \
-  -d '{"email":"test@example.com","password":"password123"}' \
-  -c cookies.txt
-```
-
-**Logout (POST):**
-```bash
-curl -X POST http://localhost/api/auth/sign-out \
-  -b cookies.txt
-```
-
-### Database Inspection
-
-**Important:** Use Prisma Studio from inside the Docker container to see the correct data:
-
-```bash
-docker exec -it backend_api npx prisma studio
-```
-
-This opens Prisma Studio at http://localhost:5555 connected to the Docker database.
-
-Navigate to:
-- `users` table: See all registered users
-- `sessions` table: See active sessions
-- `accounts` table: See authentication accounts
-- `system_settings` table: See auth configuration
-
-## Managing Users and Database
-
-### View All Users
-
-**Using the test script:**
-```bash
-docker exec backend_api npm run test:auth
-```
-
-Shows:
-- All registered users with emails and names
-- Active sessions
-- Auth configuration settings
-
-**Using SQL directly:**
-```bash
-docker exec database psql -U postgres -d myrtest -c "SELECT id, email, name FROM users;"
-```
-
-### View Active Sessions
-
-```bash
-docker exec backend_api npm run test:auth
-```
-
-Or with SQL:
-```bash
-docker exec database psql -U postgres -d myrtest -c "SELECT s.id, u.email, s.\"expiresAt\" FROM sessions s JOIN users u ON s.\"userId\" = u.id WHERE s.\"expiresAt\" > NOW();"
-```
-
-### Delete a Specific User
-
-Using Prisma Studio (recommended):
-```bash
-docker exec -it backend_api npx prisma studio
-```
-
-Then navigate to the `users` table and delete the user visually.
-
-**Or with SQL:**
-```bash
-# Replace email with the actual user email
-docker exec database psql -U postgres -d myrtest -c "DELETE FROM users WHERE email = 'user@example.com';"
-```
-
-### Clear All Users, Roles and Sessions
-
-```bash
-docker exec database psql -U postgres -d myrtest -c "TRUNCATE users, accounts, sessions, roles, user_roles, role_endpoint_mappings, audit_logs, verification CASCADE;"
-```
-
-**Warning:** This deletes ALL users, roles, mappings, audit logs and sessions permanently.
-
-### Reset Database to Fresh State
-
-```bash
-# Stop all services
-docker-compose down -v
-
-# Start services again
-docker-compose up --build -d
-
-# Wait 30 seconds, then reinitialize
-cd backend
-npx prisma db push
-cd ..
-docker exec backend_api npm run seed
-```
-
-### Access PostgreSQL Directly
-
-```bash
-# Open psql shell
-docker exec -it database psql -U postgres -d myrtest
-
-# Inside psql, you can run any SQL commands:
-# \dt              - List all tables
-# \d users         - Describe users table
-# SELECT * FROM users;
-# \q               - Exit
-```
-
-### Backup and Restore
-
-**Create Backup:**
-```bash
-docker exec database pg_dump -U postgres myrtest > backup.sql
-```
-
-**Restore from Backup:**
-```bash
-cat backup.sql | docker exec -i database psql -U postgres -d myrtest
-```
-
-### Troubleshooting
-
-**Issue: "Backend unavailable" on home page**
-- Check: `docker logs backend_api`
-- Fix: Ensure backend container is running
-
-**Issue: Registration fails**
-- Check: Password is at least 8 characters
-- Check: Email is valid format
-- Check: Email not already registered
-
-**Issue: Login fails with correct credentials**
-- Check: Better Auth is properly initialized
-- Run: `docker exec backend_api npm run test:auth`
-- Check: User exists in database
-
-**Issue: Session not persisting**
-- Check: Cookies are enabled in browser
-- Check: CORS configuration allows credentials
-- Check: `BETTER_AUTH_SECRET` is set in .env
-
-**Issue: Redirect loop**
-- Check: AuthContext is properly wrapping routes
-- Check: Session endpoint returns valid data
-- Clear browser cookies and try again
-
-**Issue: Prisma Studio shows empty database**
-- Make sure to run Prisma Studio from inside Docker: `docker exec -it backend_api npx prisma studio`
-- The local Prisma Studio connects to a different database than the Docker one
-
-**Issue: Cannot see users I created**
-- Run: `docker exec backend_api npm run test:auth` to verify users exist
-- Users are stored in the Docker PostgreSQL container, not locally
-
-**Issue: Services fail to start**
-- Check: `docker ps` to see which containers are running
-- Check logs: `docker-compose logs`
-- Try: `docker-compose down && docker-compose up --build -d`
-
-## Production Deployment
-
-### Security Checklist
-
-Before deploying to production, update these configurations:
-
-**1. Docker Compose (`docker-compose.yml`):**
-
-Change the internal network to truly isolated:
-```yaml
-networks:
-  internal_net:
-    driver: bridge
-    internal: true  # Change from false to true
-```
-
-Remove PostgreSQL port exposure:
-```yaml
-postgres:
-  # Comment out or remove the ports section:
-  # ports:
-  #   - "5432:5432"
-```
-
-**2. Environment Variables (`.env`):**
-
-Generate a strong secret:
 ```bash
 openssl rand -base64 32
 ```
 
-Update `.env`:
+## Services and URLs
+
+| Service | URL | Notes |
+|---------|-----|-------|
+| Frontend (planning app) | http://localhost | Reverse proxied by nginx. |
+| API root | http://localhost/api | Proxied to `backend_api:3000`. |
+| Health check | http://localhost/api/health | Returns DB latency + service status. |
+| Swagger UI | http://localhost/api/docs | OpenAPI spec for auth, planning, admin and roles. |
+| Demo mode | http://localhost/demo | Read only anonymised planning. |
+| Prisma Studio | http://localhost:5555 | After `docker compose exec backend npx prisma studio`. |
+| Postgres | `localhost:5432` | Exposed for development; comment out in production. |
+
+## Authentication and RBAC
+
+* **Login**: Better Auth handles sessions through `/api/auth/sign-in/email`,
+  `/api/auth/sign-out`, `/api/auth/get-session`. The frontend uses the Better
+  Auth client.
+* **Two Factor**: TOTP via the `twoFactor` plugin or email OTP delivered by
+  `email_service`. The 2FA challenge pages live in `frontend/src/pages/auth`.
+* **JWT**: After login the frontend can request a Bearer JWT through
+  `GET /api/auth/jwt-from-session` or `POST /api/auth/token`. Protected API
+  calls go through the centralised `jwtAuth` middleware which also enforces
+  RBAC by checking `RoleEndpointMapping` rows.
+* **Admin API**: `/api/admin/*` is gated by `adminAuth` (header
+  `x-admin-secret`). It is bypassed by the JWT middleware on purpose.
+* **Default roles**: `Admin User` (full access) and `Manager` (read and write
+  on planning). Admin gets all access; managers are auto attached to
+  `* /api/planning` by the bootstrap. The bootstrap also assigns the
+  `Manager` role to every existing non admin user.
+
+## Planning model overview
+
+The Prisma schema ships the following Luxlait tables (all prefixed
+`luxlait_`):
+
+* `luxlait_machines` with `importance` (`MANDATORY`, `PRIORITY`, `OPTIONAL`),
+  `max_employees`, `sort_order` and `machine_group`.
+* `luxlait_employees` with `is_backup` and `active` flags.
+* `luxlait_employee_machine_skills` with a `level` enum (`AUTONOMOUS`,
+  `IN_TRAINING`).
+* `luxlait_time_slots` (Matin, Après midi, Nuit by default).
+* `luxlait_machine_open_shifts` (which slots a machine accepts).
+* `luxlait_weekly_machine_closed_shifts` (per ISO week + weekday closures).
+* `luxlait_machine_staffing_requirements` (with a sentinel date `1970-01-01`
+  for the global recurring requirement).
+* `luxlait_machine_downtimes` and `luxlait_machine_downtime_shifts` plus their
+  default catalogue counterparts.
+* `luxlait_statuses`, `luxlait_weekly_employee_statuses`,
+  `luxlait_weekly_employee_shift_statuses`, `luxlait_default_leaves`.
+* `luxlait_daily_assignments` and `luxlait_weekly_assignments`.
+* `luxlait_solver_constraints` (22 rows seeded by SQL migration, exposed
+  read mostly to the admin UI).
+* `luxlait_profiles` linking Better Auth `User` to a planning profile.
+
+Routes:
+
+* `GET/PATCH /api/planning/*` for the catalogue and the assignments.
+* `POST /api/planning/autoplan` triggers the solver service.
+* `GET /api/planning/luxlait_solver_constraints` exposes the constraints
+  catalogue read by the **Contraintes** admin page.
+
+## Common operations
+
+```bash
+# Container management
+docker compose ps
+docker compose logs -f backend
+docker compose restart backend
+docker compose up -d --build backend     # rebuild only the backend
+
+# Database and Prisma
+docker compose exec backend npx prisma migrate status
+docker compose exec backend npx prisma studio
+docker compose exec database psql -U postgres -d luxlait_db
+
+# Authentication smoke test
+docker compose exec backend npm run test:auth
+
+# Health checks
+curl http://localhost/api/health
+curl http://localhost/api  # {"message":"Backend API is running"}
 ```
-BETTER_AUTH_SECRET=<your-generated-secret>
-BETTER_AUTH_URL=https://yourdomain.com
-NODE_ENV=production
-```
 
-**3. NGINX Configuration:**
+## Demo mode
 
-- Add SSL certificates
-- Configure proper domain names
-- Update CORS settings
-- Add rate limiting
-- Configure proper security headers
+The frontend exposes a read only demo mount at `/demo`. It loads an
+anonymised version of the planning bundle (see
+`frontend/src/lib/demoAnonymizePlanningBundle.ts`) and skips destructive
+actions. Use it to share the UI publicly without exposing real Luxlait names
+or schedules.
 
-**4. Database:**
+## Production deployment checklist
 
-- Use strong PostgreSQL password
-- Enable database backups
-- Consider managed database service
-- Set up monitoring
+Before exposing the stack to the internet:
 
-**5. Better Auth:**
+1. **Network hardening (`docker-compose.yml`):**
+   * Set `internal_net.internal: true` so internal services have no internet
+     route.
+   * Remove the public `5432:5432` port mapping on the `postgres` service.
+   * Remove the public `5555` Prisma Studio port mapping on the `backend`
+     service.
+2. **Secrets:** regenerate every secret with `openssl rand -base64 32`. At a
+   minimum: `BETTER_AUTH_SECRET`, `JWT_SECRET`, `ADMIN_SECRET`,
+   `EMAIL_SERVICE_SECRET`, `SOLVER_SERVICE_SECRET`, `POSTGRES_PASSWORD`.
+3. **Admin credentials:** set `ADMIN_EMAIL`, `ADMIN_PASSWORD` (16+ characters)
+   and `ADMIN_NAME` to real values. After the first successful login, change
+   the admin password from the user profile to invalidate the value stored in
+   `.env`.
+4. **TLS:** mount real certificates in `nginx/`, enable port `443` and force
+   redirects from port `80`.
+5. **CORS / origins:** set `BETTER_AUTH_URL` and `TRUSTED_ORIGINS` to your
+   public domain.
+6. **NODE_ENV=production** and consider switching the backend `CMD` to
+   `npm run build && npm start` for a compiled artefact instead of
+   `ts-node-dev`.
+7. **Database backups:** schedule `pg_dump` of the `database` container or use
+   a managed Postgres instance.
 
-- Configure email verification if needed
-- Set up OAuth providers if needed
-- Configure proper session timeouts
-- Enable two factor authentication if needed
+## Troubleshooting
 
-## Technologies
-
-* **Frontend**: React 18, Vite, Tailwind CSS, TypeScript
-* **Backend**: Node.js, Express, TypeScript, Prisma ORM
-* **Database**: PostgreSQL
-* **Auth**: Better Auth
-* **Infrastructure**: Docker, Docker Compose, NGINX
+| Symptom | Investigation |
+|---------|---------------|
+| Backend container restarts in a loop. | `docker compose logs backend`. Most often the bootstrap aborted because of `ADMIN_EMAIL` / `ADMIN_PASSWORD` missing in `.env`. |
+| Login returns `Invalid email or password`. | Verify `ADMIN_PASSWORD` in `.env` matches what the user types. The bootstrap never overwrites an existing user; if the user existed with another password, reset it through `/api/auth/forgot-password` or delete the row and rerun `seed:admin`. |
+| Frontend cannot reach the API. | Check that `nginx` is up (`docker compose ps`) and that `nginx.conf` resolves the `backend` service. The frontend always calls `/api/*` through nginx. |
+| Solver returns `error: solver exception`. | Ensure `SOLVER_SERVICE_SECRET` matches between backend and solver, and that the request payload matches `solver_service/models.py`. |
+| Email OTP never arrives. | Verify `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL` (must be a verified sender) and the SendGrid dashboard for blocked recipients. |
+| `prisma migrate deploy` fails. | Run `docker compose exec backend npx prisma migrate status` and inspect the failed migration. Never `npx prisma db push` against a database that already has migrations applied. |
 
 ## License
 
-Private project
+Private project. All rights reserved.

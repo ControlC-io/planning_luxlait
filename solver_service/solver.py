@@ -105,11 +105,32 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
         for u in req.unavailable_days:
             u_day = _parse_date_yyyy_mm_dd(u.day_date)
             unavailable.add((u.employee_id, u_day))
+        unavailable_shift: Set[Tuple[str, dt.date, str]] = set()
+        for u in req.unavailable_shifts:
+            u_day = _parse_date_yyyy_mm_dd(u.day_date)
+            unavailable_shift.add((u.employee_id, u_day, u.time_slot_id))
+
+        machine_closed_shift: Set[Tuple[str, dt.date, str]] = set()
+        for row in req.machine_closed_shifts:
+            c_day = _parse_date_yyyy_mm_dd(row.day_date)
+            machine_closed_shift.add((row.machine_id, c_day, row.time_slot_id))
+
+        machine_shift_min_requirements: Dict[Tuple[str, dt.date, str], int] = defaultdict(int)
+        for row in req.machine_shift_min_requirements:
+            r_day = _parse_date_yyyy_mm_dd(row.day_date)
+            machine_shift_min_requirements[(row.machine_id, r_day, row.time_slot_id)] = int(row.min_employees)
 
         qualified_for_machine: Dict[str, Set[str]] = {m_id: set() for m_id in machine_ids}
+        autonomous_for_machine: Dict[str, Set[str]] = {m_id: set() for m_id in machine_ids}
+        in_training_for_machine: Dict[str, Set[str]] = {m_id: set() for m_id in machine_ids}
         for sk in req.skills:
-            if sk.machine_id in qualified_for_machine:
-                qualified_for_machine[sk.machine_id].add(sk.employee_id)
+            if sk.machine_id not in qualified_for_machine:
+                continue
+            qualified_for_machine[sk.machine_id].add(sk.employee_id)
+            if sk.level == 'IN_TRAINING':
+                in_training_for_machine[sk.machine_id].add(sk.employee_id)
+            else:
+                autonomous_for_machine[sk.machine_id].add(sk.employee_id)
 
         # ── Handle existing (locked-in) assignments ──────────────────────────
         # Locked-in pairs are excluded from the solver entirely. Their capacity
@@ -122,24 +143,8 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
 
         locked_emp_days: Set[Tuple[str, dt.date]] = set(locked.keys())
 
-        # Validate locked assignments against machine downtime and open shift rules.
-        for (e_id, d), a in locked.items():
-            if d in machine_downtime_by_machine_id.get(a.machine_id, set()):
-                return SolveResponse(
-                    ok=False,
-                    assignments=[],
-                    stats={"durationMs": int((time.time() - start) * 1000), "error": "Locked downtime conflict"},
-                    error="Locked assignment uses a machine that is down for this day",
-                )
-
-            open_slots = machine_open_time_slots_by_machine_id.get(a.machine_id, set())
-            if a.time_slot_id and open_slots and a.time_slot_id not in open_slots:
-                return SolveResponse(
-                    ok=False,
-                    assignments=[],
-                    stats={"durationMs": int((time.time() - start) * 1000), "error": "Locked open shift conflict"},
-                    error="Locked assignment uses a machine that is not open for this time slot",
-                )
+        # Locked assignments represent the user's accepted plan. Skip
+        # validation so pre-existing inconsistencies do not block re-plans.
 
         # Count how many locked-in employees sit on each (machine, day).
         locked_capacity_used: Dict[Tuple[str, dt.date], int] = defaultdict(int)
@@ -163,36 +168,129 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
         assigned_any: Dict[Tuple[str, dt.date], cp_model.IntVar] = {}
         t: Dict[Tuple[str, dt.date, str], cp_model.IntVar] = {}
 
+        machines_for_employee: Dict[str, Set[str]] = {e_id: set() for e_id in employee_ids}
+        for m_id, emp_set in qualified_for_machine.items():
+            for e_id in emp_set:
+                if e_id in machines_for_employee:
+                    machines_for_employee[e_id].add(m_id)
+
         for e_id in employee_ids:
             for d in days:
                 if (e_id, d) in locked_emp_days:
+                    continue
+                if (e_id, d) in unavailable:
+                    continue
+
+                eligible = [
+                    m_id for m_id in machines_for_employee[e_id]
+                    if d not in machine_downtime_by_machine_id.get(m_id, set())
+                ]
+                if not eligible:
                     continue
 
                 assigned = model.new_bool_var(f"assigned_e{e_id}_d{d.isoformat()}")
                 assigned_any[(e_id, d)] = assigned
 
-                is_unavailable = (e_id, d) in unavailable
+                for m_id in eligible:
+                    x[(e_id, d, m_id)] = model.new_bool_var(f"x_e{e_id}_d{d.isoformat()}_m{m_id}")
 
-                for m_id in machine_ids:
-                    var = model.new_bool_var(f"x_e{e_id}_d{d.isoformat()}_m{m_id}")
-                    x[(e_id, d, m_id)] = var
-
-                    if is_unavailable:
-                        model.add(var == 0)
-                    if d in machine_downtime_by_machine_id.get(m_id, set()):
-                        model.add(var == 0)
-
-                sum_x = sum(x[(e_id, d, m_id)] for m_id in machine_ids)
-                model.add(sum_x == assigned)
+                model.add(sum(x[(e_id, d, m_id)] for m_id in eligible) == assigned)
 
                 for ts_id in working_time_slot_ids:
-                    t_var = model.new_bool_var(f"t_e{e_id}_d{d.isoformat()}_ts{ts_id}")
-                    t[(e_id, d, ts_id)] = t_var
+                    t[(e_id, d, ts_id)] = model.new_bool_var(f"t_e{e_id}_d{d.isoformat()}_ts{ts_id}")
 
                 if req.constraints.enforce_time_slot_when_assigned:
                     model.add(sum(t[(e_id, d, ts_id)] for ts_id in working_time_slot_ids) == assigned)
                 else:
                     model.add(sum(t[(e_id, d, ts_id)] for ts_id in working_time_slot_ids) <= assigned)
+
+        # ── Hard caps inspired by Luxembourg Code du travail ────────────────
+        # Locked assignments count toward every cap. Setting any limit to 0
+        # disables that specific rule.
+        max_work_days_per_week = int(req.constraints.max_work_days_per_week)
+        min_rest_days_per_week = int(req.constraints.min_rest_days_per_week)
+        max_consecutive_work_days = int(req.constraints.max_consecutive_work_days)
+
+        # Group planning days by ISO calendar week (Mon to Sun).
+        days_by_iso_week: Dict[Tuple[int, int], List[dt.date]] = defaultdict(list)
+        for d in days:
+            iso_year, iso_week, _ = d.isocalendar()
+            days_by_iso_week[(iso_year, iso_week)].append(d)
+
+        if max_work_days_per_week > 0 or min_rest_days_per_week > 0:
+            for e_id in employee_ids:
+                for _week_key, week_days in days_by_iso_week.items():
+                    locked_count_in_week = sum(
+                        1 for d in week_days if (e_id, d) in locked_emp_days
+                    )
+                    solver_lits = [
+                        assigned_any[(e_id, d)]
+                        for d in week_days
+                        if (e_id, d) in assigned_any
+                    ]
+
+                    week_caps: List[int] = []
+                    if max_work_days_per_week > 0:
+                        week_caps.append(max_work_days_per_week)
+                    if min_rest_days_per_week > 0:
+                        # Cap derived from the legal floor of off days.
+                        # Apply only inside the planning window of this
+                        # week so partial weeks are not forced to extra off
+                        # days they cannot take.
+                        week_caps.append(max(0, len(week_days) - min_rest_days_per_week))
+
+                    if not week_caps:
+                        continue
+
+                    effective_cap = min(week_caps)
+                    remaining = effective_cap - locked_count_in_week
+                    if remaining <= 0:
+                        # Locked plan already saturates the cap. Force every
+                        # solver decided day off. We do not error out: locked
+                        # rows are accepted by the user and may pre-violate
+                        # the cap.
+                        for lit in solver_lits:
+                            model.add(lit == 0)
+                        continue
+
+                    if solver_lits:
+                        model.add(sum(solver_lits) <= remaining)
+
+        if max_consecutive_work_days > 0 and len(days) > max_consecutive_work_days:
+            window_size = max_consecutive_work_days + 1
+            for e_id in employee_ids:
+                for start in range(len(days) - max_consecutive_work_days):
+                    window = days[start : start + window_size]
+                    locked_in_window = sum(
+                        1 for d in window if (e_id, d) in locked_emp_days
+                    )
+                    solver_lits_window = [
+                        assigned_any[(e_id, d)]
+                        for d in window
+                        if (e_id, d) in assigned_any
+                    ]
+
+                    remaining = max_consecutive_work_days - locked_in_window
+                    if remaining <= 0:
+                        for lit in solver_lits_window:
+                            model.add(lit == 0)
+                        continue
+
+                    if solver_lits_window:
+                        model.add(sum(solver_lits_window) <= remaining)
+
+        # ── Shared overlap cache: ov[(e,d,m,ts)] = x[(e,d,m)] AND t[(e,d,ts)] ─
+        overlap_cache: Dict[Tuple[str, dt.date, str, str], cp_model.IntVar] = {}
+
+        def get_overlap(e_id: str, d: dt.date, m_id: str, ts_id: str) -> cp_model.IntVar:
+            key = (e_id, d, m_id, ts_id)
+            if key not in overlap_cache:
+                v = model.new_bool_var(f"ov_e{e_id}_m{m_id}_d{d.isoformat()}_ts{ts_id}")
+                model.add(v <= x[(e_id, d, m_id)])
+                model.add(v <= t[(e_id, d, ts_id)])
+                model.add(v >= x[(e_id, d, m_id)] + t[(e_id, d, ts_id)] - 1)
+                overlap_cache[key] = v
+            return overlap_cache[key]
 
         # ── Open shift constraint: restrict machines by time slot ─────────
         for m_id in machine_ids:
@@ -205,11 +303,15 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                     if (e_id, d, m_id) not in x:
                         continue
 
-                    compatible_lits = [
-                        t[(e_id, d, ts_id)]
-                        for ts_id in open_slots
-                        if (e_id, d, ts_id) in t
-                    ]
+                    compatible_lits = []
+                    for ts_id in open_slots:
+                        if (e_id, d, ts_id) not in t:
+                            continue
+                        if (e_id, d, ts_id) in unavailable_shift:
+                            continue
+                        if (m_id, d, ts_id) in machine_closed_shift:
+                            continue
+                        compatible_lits.append(t[(e_id, d, ts_id)])
                     if compatible_lits:
                         # If the employee is assigned to this machine, the time slot must be compatible.
                         model.add(x[(e_id, d, m_id)] <= sum(compatible_lits))
@@ -239,6 +341,9 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                     continue
 
                 for ts_id in open_slots:
+                    if (m_id, d, ts_id) in machine_closed_shift:
+                        # Closed shifts must not require coverage, even for mandatory machines.
+                        continue
                     if ts_id not in working_time_slot_set:
                         if m.importance == "MANDATORY":
                             return SolveResponse(
@@ -274,14 +379,12 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                             continue
                         if (e_id, d, m_id) not in x or (e_id, d, ts_id) not in t:
                             continue
+                        if (e_id, d, ts_id) in unavailable_shift:
+                            continue
+                        if (m_id, d, ts_id) in machine_closed_shift:
+                            continue
 
-                        overlap = model.new_bool_var(
-                            f"ov_e{e_id}_m{m_id}_d{d.isoformat()}_ts{ts_id}"
-                        )
-                        model.add(overlap <= x[(e_id, d, m_id)])
-                        model.add(overlap <= t[(e_id, d, ts_id)])
-                        model.add(overlap >= x[(e_id, d, m_id)] + t[(e_id, d, ts_id)] - 1)
-                        candidate_overlap_lits.append(overlap)
+                        candidate_overlap_lits.append(get_overlap(e_id, d, m_id, ts_id))
 
                     if not candidate_overlap_lits:
                         if m.importance == "MANDATORY":
@@ -317,67 +420,150 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                     elif m.importance == "PRIORITY":
                         priority_shift_covered_vars.append(shift_covered)
 
-        # Machine capacity (subtract locked-in occupants) and skills pairing
+        # Qualification is enforced by pre-filtering: x[(e,d,m)] only exists
+        # when the employee is qualified for the machine, so no extra
+        # constraints are needed here.
+
+        # Enforce max capacity per machine per shift.
         for m_id in machine_ids:
             m = machine_by_id[m_id]
             base_max = int(m.max_employees)
+            if base_max <= 0:
+                continue
+            downtime_set = machine_downtime_by_machine_id.get(m_id, set())
+            for d in days:
+                if d in downtime_set:
+                    continue
+                for ts_id in working_time_slot_ids:
+                    if (m_id, d, ts_id) in machine_closed_shift:
+                        continue
+                    cap_overlaps: List[cp_model.IntVar] = []
+                    for e_id in employee_ids:
+                        if (e_id, d) in locked_emp_days:
+                            continue
+                        if (e_id, d, m_id) not in x or (e_id, d, ts_id) not in t:
+                            continue
+                        cap_overlaps.append(get_overlap(e_id, d, m_id, ts_id))
+                    if cap_overlaps:
+                        locked_on_shift = locked_shift_coverage.get((m_id, d, ts_id), 0)
+                        remaining = max(0, base_max - locked_on_shift)
+                        model.add(sum(cap_overlaps) <= remaining)
+
+        # ── "In training never solo" constraint ─────────────────────────────
+        # An employee with skill level IN_TRAINING must never be the only
+        # operator on a given machine + day + shift. There must be at least one
+        # AUTONOMOUS coworker (locked or solver assigned) on the same shift.
+        for m_id in machine_ids:
+            in_training_set = in_training_for_machine.get(m_id, set())
+            if not in_training_set:
+                continue
+            autonomous_set = autonomous_for_machine.get(m_id, set())
             downtime_set = machine_downtime_by_machine_id.get(m_id, set())
 
             for d in days:
                 if d in downtime_set:
                     continue
 
-                locked_count = locked_capacity_used.get((m_id, d), 0)
-                free_emps = [e_id for e_id in employee_ids if (e_id, d) not in locked_emp_days]
+                for ts_id in working_time_slot_ids:
+                    if (m_id, d, ts_id) in machine_closed_shift:
+                        continue
 
-                if not free_emps:
-                    if m.importance == "MANDATORY" and locked_count < 1:
-                        return SolveResponse(
-                            ok=False,
-                            assignments=[],
-                            stats={"durationMs": int((time.time() - start) * 1000), "error": "Mandatory machine empty day"},
-                            error="Mandatory machine has no available capacity on this day",
-                        )
-                    continue
+                    in_training_overlaps: List[cp_model.IntVar] = []
+                    for e_id in in_training_set:
+                        if (e_id, d) in locked_emp_days:
+                            continue
+                        if (e_id, d) in unavailable:
+                            continue
+                        if (e_id, d, m_id) not in x or (e_id, d, ts_id) not in t:
+                            continue
+                        if (e_id, d, ts_id) in unavailable_shift:
+                            continue
+                        in_training_overlaps.append(get_overlap(e_id, d, m_id, ts_id))
 
-                sum_x_md = sum(x[(e_id, d, m_id)] for e_id in free_emps)
-                remaining_capacity = base_max - locked_count
+                    if not in_training_overlaps:
+                        continue
 
-                if m.importance == "MANDATORY":
-                    model.add(sum_x_md + locked_count >= 1)
+                    autonomous_overlaps: List[cp_model.IntVar] = []
+                    for e_id in autonomous_set:
+                        if (e_id, d) in locked_emp_days:
+                            continue
+                        if (e_id, d) in unavailable:
+                            continue
+                        if (e_id, d, m_id) not in x or (e_id, d, ts_id) not in t:
+                            continue
+                        if (e_id, d, ts_id) in unavailable_shift:
+                            continue
+                        autonomous_overlaps.append(get_overlap(e_id, d, m_id, ts_id))
 
-                if remaining_capacity <= 0:
-                    model.add(sum_x_md == 0)
-                    continue
+                    locked_autonomous_count = 0
+                    for (e_id, ld), a in locked.items():
+                        if ld != d or a.machine_id != m_id or a.time_slot_id != ts_id:
+                            continue
+                        if e_id in autonomous_set:
+                            locked_autonomous_count += 1
 
-                model.add(sum_x_md <= remaining_capacity)
+                    if not autonomous_overlaps and locked_autonomous_count == 0:
+                        # No possible AUTONOMOUS partner on this shift → forbid
+                        # any IN_TRAINING assignment on it.
+                        for ov_f in in_training_overlaps:
+                            model.add(ov_f == 0)
+                        continue
 
-                qualified_in_scope = qualified_for_machine.get(m_id, set())
-                qualified_vars = [
-                    x[(e_id, d, m_id)] for e_id in qualified_in_scope if (e_id, d, m_id) in x
-                ]
+                    autonomous_sum = sum(autonomous_overlaps) + locked_autonomous_count
+                    for ov_f in in_training_overlaps:
+                        model.add(ov_f <= autonomous_sum)
 
-                if not qualified_in_scope:
-                    model.add(sum_x_md == 0)
-                    continue
-
-                used_md = model.new_bool_var(f"used_m{m_id}_d{d.isoformat()}")
-                model.add(sum_x_md >= 1).only_enforce_if(used_md)
-                model.add(sum_x_md == 0).only_enforce_if(used_md.Not())
-
-                already_has_locked_qualified = any(
-                    a.employee_id in qualified_in_scope
-                    for (e_id2, d2), a in locked.items()
-                    if d2 == d and a.machine_id == m_id
+        # Enforce minimum staffing by machine/day/shift.
+        for (m_id, d, ts_id), required_count in machine_shift_min_requirements.items():
+            if required_count <= 0:
+                continue
+            if m_id not in machine_id_set or d not in days_set:
+                continue
+            open_slots = machine_open_time_slots_by_machine_id.get(m_id, set())
+            if open_slots and ts_id not in open_slots:
+                return SolveResponse(
+                    ok=False,
+                    assignments=[],
+                    stats={"durationMs": int((time.time() - start) * 1000), "error": "Min staffing on closed open-shift"},
+                    error=f"Min staffing requires machine {m_id} on {d.isoformat()} and time slot {ts_id}, but this slot is not open for the machine",
+                )
+            if (m_id, d, ts_id) in machine_closed_shift:
+                return SolveResponse(
+                    ok=False,
+                    assignments=[],
+                    stats={"durationMs": int((time.time() - start) * 1000), "error": "Min staffing on machine closed shift"},
+                    error=f"Min staffing requires machine {m_id} on {d.isoformat()} and time slot {ts_id}, but this shift is closed",
+                )
+            if d in machine_downtime_by_machine_id.get(m_id, set()):
+                return SolveResponse(
+                    ok=False,
+                    assignments=[],
+                    stats={"durationMs": int((time.time() - start) * 1000), "error": "Min staffing on downtime day"},
+                    error=f"Min staffing requires machine {m_id} on {d.isoformat()}, but machine is down on this day",
                 )
 
-                if qualified_vars:
-                    if already_has_locked_qualified:
-                        pass
-                    else:
-                        model.add(sum(qualified_vars) >= 1).only_enforce_if(used_md)
-                elif not already_has_locked_qualified:
-                    model.add(used_md == 0)
+            overlaps: List[cp_model.IntVar] = []
+            locked_count = locked_shift_coverage.get((m_id, d, ts_id), 0)
+            for e_id in employee_ids:
+                if e_id not in qualified_for_machine.get(m_id, set()):
+                    continue
+                if (e_id, d) in locked_emp_days:
+                    continue
+                if (e_id, d, m_id) not in x or (e_id, d, ts_id) not in t:
+                    continue
+                if (e_id, d, ts_id) in unavailable_shift or (e_id, d) in unavailable:
+                    continue
+                overlaps.append(get_overlap(e_id, d, m_id, ts_id))
+
+            if not overlaps and locked_count < required_count:
+                return SolveResponse(
+                    ok=False,
+                    assignments=[],
+                    stats={"durationMs": int((time.time() - start) * 1000), "error": "Insufficient workforce for minimum staffing"},
+                    error=f"Not enough feasible employees for machine {m_id} on {d.isoformat()} and time slot {ts_id}",
+                )
+
+            model.add(sum(overlaps) + locked_count >= required_count)
 
         # Rest constraint: no Nuit followed by Matin next day
         if has_night_and_morning:
@@ -426,6 +612,8 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
             for (e_id, d), ra in ref_by_emp_day.items():
                 if (e_id, d) in locked_emp_days:
                     continue
+                if (e_id, d) in unavailable:
+                    continue
 
                 if (e_id, d, ra.machine_id) in x:
                     keep_m = model.new_bool_var(f"keep_m_e{e_id}_d{d.isoformat()}")
@@ -436,6 +624,34 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                     keep_ts = model.new_bool_var(f"keep_ts_e{e_id}_d{d.isoformat()}")
                     model.add(keep_ts == t[(e_id, d, ra.time_slot_id)])
                     stability_keep_vars.append(keep_ts)
+
+        # ── Solution hints from reference assignments (warm start) ─────────
+        if req.reference_assignments:
+            ref_hint_by_emp_day: Dict[Tuple[str, dt.date], ExistingAssignmentInput] = {}
+            for ra in req.reference_assignments:
+                rd = _parse_date_yyyy_mm_dd(ra.day_date)
+                if ra.employee_id in employee_id_set and rd in days_set:
+                    ref_hint_by_emp_day[(ra.employee_id, rd)] = ra
+
+            for (e_id, d), ra in ref_hint_by_emp_day.items():
+                if (e_id, d) in locked_emp_days:
+                    continue
+                if (e_id, d) in unavailable:
+                    continue
+
+                if (e_id, d) in assigned_any:
+                    model.add_hint(assigned_any[(e_id, d)], 1)
+
+                for m_id in machine_ids:
+                    if (e_id, d, m_id) in x:
+                        model.add_hint(x[(e_id, d, m_id)], 1 if m_id == ra.machine_id else 0)
+
+                for ts_id in working_time_slot_ids:
+                    if (e_id, d, ts_id) in t:
+                        model.add_hint(
+                            t[(e_id, d, ts_id)],
+                            1 if ts_id == ra.time_slot_id else 0,
+                        )
 
         # ── Fairness objective ───────────────────────────────────────────────
         totals: Dict[str, cp_model.IntVar] = {}
@@ -463,21 +679,162 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
         fairness_weight = req.constraints.fairness_weight
         priority_weight = req.constraints.priority_machine_weight
         stability_weight = req.constraints.stability_weight
+        training_weight = req.constraints.training_bonus_weight
+        polyvalent_a_weight = req.constraints.polyvalent_in_autonomous_bonus_weight
+        polyvalent_f_weight = req.constraints.polyvalent_in_training_bonus_weight
+        extra_coverage_weight = req.constraints.extra_coverage_penalty_weight
 
         priority_shift_covered_sum = (
             sum(priority_shift_covered_vars) if priority_shift_covered_vars else 0
         )
         stability_bonus = sum(stability_keep_vars) if stability_keep_vars else 0
+
+        # Categorize employees by skill profile.
+        employees_with_autonomous_skill: Set[str] = set()
+        for emp_set in autonomous_for_machine.values():
+            employees_with_autonomous_skill.update(emp_set)
+        employees_with_in_training_skill: Set[str] = set()
+        for emp_set in in_training_for_machine.values():
+            employees_with_in_training_skill.update(emp_set)
+
+        # F-only: every skill is IN_TRAINING. They have nothing else to do.
+        in_training_only_employees: Set[str] = (
+            employees_with_in_training_skill - employees_with_autonomous_skill
+        )
+        # F-partial: have both A and F skills. They are polyvalent.
+        polyvalent_employees: Set[str] = (
+            employees_with_in_training_skill & employees_with_autonomous_skill
+        )
+
+        # Per-employee, per-day map of their A and F qualified machines (so we
+        # can build work_a and work_f indicator variables for polyvalents).
+        autonomous_machines_for_employee: Dict[str, List[str]] = {
+            e_id: [m_id for m_id in machine_ids if e_id in autonomous_for_machine.get(m_id, set())]
+            for e_id in polyvalent_employees
+        }
+        in_training_machines_for_employee: Dict[str, List[str]] = {
+            e_id: [m_id for m_id in machine_ids if e_id in in_training_for_machine.get(m_id, set())]
+            for e_id in polyvalent_employees
+        }
+
+        # Bonus 1: F-only employees scheduled (any machine, any day).
+        training_bonus_lits: List[cp_model.IntVar] = []
+        for (e_id, d), assigned_var in assigned_any.items():
+            if e_id in in_training_only_employees:
+                training_bonus_lits.append(assigned_var)
+        training_bonus = sum(training_bonus_lits) if training_bonus_lits else 0
+
+        # Bonus 2 & 3: polyvalent employees scheduled, split by skill level
+        # of the assigned machine. Bonus on autonomous > bonus on training so
+        # the solver prefers placing them on productive work; but the F bonus
+        # is non zero so they still go to training if no A slot is available.
+        polyvalent_a_bonus_lits: List[cp_model.IntVar] = []
+        polyvalent_f_bonus_lits: List[cp_model.IntVar] = []
+        for e_id in polyvalent_employees:
+            for d in days:
+                if (e_id, d) not in assigned_any:
+                    continue
+
+                a_overlaps_today = [
+                    x[(e_id, d, m_id)]
+                    for m_id in autonomous_machines_for_employee.get(e_id, [])
+                    if (e_id, d, m_id) in x
+                ]
+                if a_overlaps_today:
+                    work_a = model.new_bool_var(
+                        f"work_a_e{e_id}_d{d.isoformat()}"
+                    )
+                    # An employee can be assigned to at most one machine per
+                    # day (assigned_any is binary), so the sum is 0 or 1.
+                    model.add(sum(a_overlaps_today) == work_a)
+                    polyvalent_a_bonus_lits.append(work_a)
+
+                f_overlaps_today = [
+                    x[(e_id, d, m_id)]
+                    for m_id in in_training_machines_for_employee.get(e_id, [])
+                    if (e_id, d, m_id) in x
+                ]
+                if f_overlaps_today:
+                    work_f = model.new_bool_var(
+                        f"work_f_e{e_id}_d{d.isoformat()}"
+                    )
+                    model.add(sum(f_overlaps_today) == work_f)
+                    polyvalent_f_bonus_lits.append(work_f)
+        polyvalent_a_bonus = (
+            sum(polyvalent_a_bonus_lits) if polyvalent_a_bonus_lits else 0
+        )
+        polyvalent_f_bonus = (
+            sum(polyvalent_f_bonus_lits) if polyvalent_f_bonus_lits else 0
+        )
+
+        # Penalize any coverage above the minimum required per (machine, day,
+        # time slot). Saving manpower on shifts that already meet the min
+        # avoids unnecessary cost (A+A doublons or A+F doublons when the F
+        # bonus is not high enough to justify the extra body).
+        extra_coverage_vars: List[cp_model.IntVar] = []
+        for m_id in machine_ids:
+            open_slots = machine_open_time_slots_by_machine_id.get(m_id, set())
+            if not open_slots:
+                continue
+            downtime_set = machine_downtime_by_machine_id.get(m_id, set())
+            qualified = qualified_for_machine.get(m_id, set())
+
+            for d in days:
+                if d in downtime_set:
+                    continue
+                for ts_id in open_slots:
+                    if (m_id, d, ts_id) in machine_closed_shift:
+                        continue
+
+                    shift_overlaps: List[cp_model.IntVar] = []
+                    for e_id in qualified:
+                        if (e_id, d) in locked_emp_days:
+                            continue
+                        if (e_id, d) in unavailable:
+                            continue
+                        if (e_id, d, m_id) not in x or (e_id, d, ts_id) not in t:
+                            continue
+                        if (e_id, d, ts_id) in unavailable_shift:
+                            continue
+                        shift_overlaps.append(get_overlap(e_id, d, m_id, ts_id))
+
+                    if not shift_overlaps:
+                        continue
+
+                    locked_count = locked_shift_coverage.get((m_id, d, ts_id), 0)
+                    min_req = machine_shift_min_requirements.get((m_id, d, ts_id), 0)
+                    upper_bound = len(shift_overlaps) + locked_count
+                    if upper_bound <= min_req:
+                        continue
+
+                    extra_var = model.new_int_var(
+                        0,
+                        upper_bound,
+                        f"extra_m{m_id}_d{d.isoformat()}_ts{ts_id}",
+                    )
+                    model.add(
+                        extra_var >= sum(shift_overlaps) + locked_count - min_req
+                    )
+                    extra_coverage_vars.append(extra_var)
+        extra_coverage_total = (
+            sum(extra_coverage_vars) if extra_coverage_vars else 0
+        )
+
         objective = (
             fairness_weight * fairness_cost
             - priority_weight * priority_shift_covered_sum
             - stability_weight * stability_bonus
+            - training_weight * training_bonus
+            - polyvalent_a_weight * polyvalent_a_bonus
+            - polyvalent_f_weight * polyvalent_f_bonus
+            + extra_coverage_weight * extra_coverage_total
         )
         model.minimize(objective)
 
         # ── Solve ────────────────────────────────────────────────────────────
         solver = cp_model.CpSolver()
         solver.parameters.max_time_in_seconds = float(req.constraints.solve_time_limit_seconds)
+        solver.parameters.relative_gap_limit = float(req.constraints.relative_gap_limit)
         solver.parameters.num_search_workers = 8
 
         status = solver.solve(model)
@@ -518,7 +875,7 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
 
                 chosen_machine_id: Optional[str] = None
                 for m_id in machine_ids:
-                    if solver.value(x[(e_id, d, m_id)]) == 1:
+                    if (e_id, d, m_id) in x and solver.value(x[(e_id, d, m_id)]) == 1:
                         chosen_machine_id = m_id
                         break
 
@@ -543,8 +900,6 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                     )
                 )
 
-        assignments = [a for a in assignments if a.time_slot_id]
-
         return SolveResponse(
             ok=True,
             assignments=assignments,
@@ -553,6 +908,9 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                 "durationMs": duration_ms,
                 "lockedAssignments": len(locked),
                 "referenceAssignments": len(stability_keep_vars),
+                "xVars": len(x),
+                "tVars": len(t),
+                "overlapVars": len(overlap_cache),
             },
         )
     except Exception as e:  # noqa: BLE001
