@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import express, { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
+import { verifyPassword } from 'better-auth/crypto';
 import jwt from 'jsonwebtoken';
 import prisma from '../lib/prisma';
 import { sendOtp } from '../lib/emailService';
@@ -185,7 +186,17 @@ router.post('/token', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const passwordValid = await bcrypt.compare(password, credentialAccount.password);
+    const stored = credentialAccount.password;
+    let passwordValid = false;
+    if (stored.startsWith('$2')) {
+      passwordValid = await bcrypt.compare(password, stored);
+    } else {
+      try {
+        passwordValid = await verifyPassword({ hash: stored, password });
+      } catch {
+        passwordValid = false;
+      }
+    }
     if (!passwordValid) {
       res.status(401).json({ error: 'Invalid credentials' });
       return;

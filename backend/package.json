@@ -15,6 +15,7 @@
     "seed:planning": "ts-node src/scripts/seed-planning.ts",
     "seed:luxlait": "ts-node src/scripts/seed-luxlait-real.ts",
     "seed:admin": "ts-node src/scripts/seed-admin.ts",
+    "password:reset-credential": "ts-node src/scripts/reset-credential-password.ts",
     "seed:bootstrap": "ts-node src/scripts/bootstrap.ts",
     "test:auth": "ts-node src/scripts/test-auth.ts"
   },
