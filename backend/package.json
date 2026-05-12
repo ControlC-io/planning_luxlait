@@ -1,7 +1,7 @@
 {
-  "name": "myrtest-backend",
+  "name": "luxlait-backend",
   "version": "1.0.0",
-  "description": "Backend API for DMZ architecture project",
+  "description": "Luxlait Planning backend API (Express + Prisma + Better Auth)",
   "main": "dist/index.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
@@ -14,6 +14,8 @@
     "seed": "ts-node src/scripts/seed.ts",
     "seed:planning": "ts-node src/scripts/seed-planning.ts",
     "seed:luxlait": "ts-node src/scripts/seed-luxlait-real.ts",
+    "seed:admin": "ts-node src/scripts/seed-admin.ts",
+    "seed:bootstrap": "ts-node src/scripts/bootstrap.ts",
     "test:auth": "ts-node src/scripts/test-auth.ts"
   },
   "dependencies": {

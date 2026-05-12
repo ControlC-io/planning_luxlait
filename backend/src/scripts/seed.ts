@@ -1,8 +1,7 @@
 import { PrismaClient } from '@prisma/client';
+import prisma from '../lib/prisma';
 
-const prisma = new PrismaClient();
-
-const seedAuthSettings = async () => {
+export const seedAuthSettings = async (client: PrismaClient = prisma): Promise<void> => {
   console.log('Seeding auth configuration settings...');
 
   const settings = [
@@ -31,24 +30,24 @@ const seedAuthSettings = async () => {
   ];
 
   for (const setting of settings) {
-    const existing = await prisma.systemSettings.findUnique({
+    const existing = await client.systemSettings.findUnique({
       where: { settingKey: setting.settingKey }
     });
 
     if (existing) {
-      console.log(`  ✓ ${setting.settingKey} already exists`);
+      console.log(`  = ${setting.settingKey} already exists`);
     } else {
-      await prisma.systemSettings.create({
+      await client.systemSettings.create({
         data: setting
       });
       console.log(`  + Created ${setting.settingKey} (enabled: ${setting.isEnabled})`);
     }
   }
 
-  console.log('\nAuth settings seeded successfully!');
+  console.log('Auth settings seeded successfully.');
 };
 
-const seedRoles = async () => {
+export const seedRoles = async (client: PrismaClient = prisma): Promise<void> => {
   console.log('Seeding default RBAC roles...');
 
   const defaultRoles = [
@@ -57,28 +56,28 @@ const seedRoles = async () => {
   ];
 
   for (const role of defaultRoles) {
-    const existing = await prisma.role.findUnique({
+    const existing = await client.role.findUnique({
       where: { name: role.name },
     });
 
     if (existing) {
-      console.log(`  ✓ Role "${role.name}" already exists`);
+      console.log(`  = Role "${role.name}" already exists`);
     } else {
-      await prisma.role.create({
+      await client.role.create({
         data: role,
       });
       console.log(`  + Created role "${role.name}"`);
     }
   }
 
-  console.log('Default roles seeded successfully!');
+  console.log('Default roles seeded successfully.');
 };
 
-const seedPlanningRbac = async () => {
+export const seedPlanningRbac = async (client: PrismaClient = prisma): Promise<void> => {
   console.log('Seeding RBAC for planning endpoints...');
 
-  const adminRole = await prisma.role.findUnique({ where: { name: 'Admin User' } });
-  const managerRole = await prisma.role.findUnique({ where: { name: 'Manager' } });
+  const adminRole = await client.role.findUnique({ where: { name: 'Admin User' } });
+  const managerRole = await client.role.findUnique({ where: { name: 'Manager' } });
 
   if (!adminRole || !managerRole) {
     console.log('  Skipping planning RBAC seeding (roles not found yet).');
@@ -89,7 +88,7 @@ const seedPlanningRbac = async () => {
   const method = '*';
 
   const ensureMapping = async (roleId: string) => {
-    const existing = await prisma.roleEndpointMapping.findUnique({
+    const existing = await client.roleEndpointMapping.findUnique({
       where: {
         roleId_endpoint_method: {
           roleId,
@@ -100,7 +99,7 @@ const seedPlanningRbac = async () => {
     });
 
     if (!existing) {
-      await prisma.roleEndpointMapping.create({
+      await client.roleEndpointMapping.create({
         data: { roleId, endpoint, method },
       });
       console.log(`  + Created endpoint mapping for role ${roleId}: ${method} ${endpoint}`);
@@ -110,12 +109,21 @@ const seedPlanningRbac = async () => {
   await ensureMapping(adminRole.id);
   await ensureMapping(managerRole.id);
 
-  console.log('Seeding user role assignments for planning...');
+  console.log('Seeding manager role assignment for existing non admin users...');
   const managerId = managerRole.id;
-  const users = await prisma.user.findMany({ select: { id: true } });
+  const adminId = adminRole.id;
+  const users = await client.user.findMany({
+    select: {
+      id: true,
+      userRoles: { select: { roleId: true } },
+    },
+  });
 
   for (const u of users) {
-    const existing = await prisma.userRole.findUnique({
+    const isAdmin = u.userRoles.some((r) => r.roleId === adminId);
+    if (isAdmin) continue;
+
+    const existing = await client.userRole.findUnique({
       where: {
         userId_roleId: {
           userId: u.id,
@@ -125,7 +133,7 @@ const seedPlanningRbac = async () => {
     });
 
     if (!existing) {
-      await prisma.userRole.create({
+      await client.userRole.create({
         data: { userId: u.id, roleId: managerId },
       });
     }
@@ -145,4 +153,6 @@ const main = async () => {
   }
 };
 
-main();
+if (require.main === module) {
+  void main();
+}

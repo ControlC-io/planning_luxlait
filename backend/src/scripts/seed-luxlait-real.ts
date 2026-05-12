@@ -1,7 +1,7 @@
-import { PrismaClient, SkillLevel, MachineImportance } from "@prisma/client";
+import { SkillLevel, MachineImportance } from "@prisma/client";
 import { randomUUID } from "crypto";
+import prisma from "../lib/prisma";
 
-const prisma = new PrismaClient();
 const uuid = () => randomUUID();
 
 // Sentinel date used by the planning routes to mark a global, recurring
@@ -250,8 +250,37 @@ async function purgePlanning() {
   console.log("  All luxlait_* tables cleared.\n");
 }
 
-async function seed() {
-  await purgePlanning();
+export type SeedLuxlaitOptions = {
+  // When true (default for the dev CLI), purge all luxlait_* tables before
+  // inserting the reference data. The bootstrap orchestrator passes false
+  // so the seed never overwrites data on an already populated VM.
+  purge?: boolean;
+  // When true, the seed becomes a no op as soon as luxlait_machines or
+  // luxlait_employees already contains rows. Used by the bootstrap path on
+  // production VMs to guarantee no destructive behaviour after the first
+  // deploy.
+  skipIfPopulated?: boolean;
+};
+
+export async function seedLuxlaitReal(options: SeedLuxlaitOptions = {}): Promise<void> {
+  const { purge = true, skipIfPopulated = false } = options;
+
+  if (skipIfPopulated) {
+    const [machineCount, employeeCount] = await Promise.all([
+      prisma.luxlaitMachine.count(),
+      prisma.luxlaitEmployee.count(),
+    ]);
+    if (machineCount > 0 || employeeCount > 0) {
+      console.log(
+        `Luxlait reference data already present (machines=${machineCount}, employees=${employeeCount}); skipping seed.\n`
+      );
+      return;
+    }
+  }
+
+  if (purge) {
+    await purgePlanning();
+  }
 
   // ------------------------------------------------------------------ Machines
   console.log("Creating machines...");
@@ -452,7 +481,7 @@ async function seed() {
 
 async function main() {
   try {
-    await seed();
+    await seedLuxlaitReal({ purge: true });
   } catch (err) {
     console.error("Seed failed:", err);
     process.exit(1);
@@ -461,4 +490,6 @@ async function main() {
   }
 }
 
-main();
+if (require.main === module) {
+  void main();
+}

@@ -25,7 +25,7 @@ services:
       - internal_net
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-myrtest}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-luxlait_db}"]
       interval: 3s
       timeout: 5s
       retries: 5
@@ -49,6 +49,10 @@ services:
       EMAIL_SERVICE_SECRET: ${EMAIL_SERVICE_SECRET}
       SOLVER_SERVICE_URL: ${SOLVER_SERVICE_URL:-http://solver_service:8000}
       SOLVER_SERVICE_SECRET: ${SOLVER_SERVICE_SECRET}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      ADMIN_NAME: ${ADMIN_NAME:-Administrator}
+      BOOTSTRAP_ON_BOOT: ${BOOTSTRAP_ON_BOOT:-true}
     volumes:
       - ./backend:/app
       - /app/node_modules
