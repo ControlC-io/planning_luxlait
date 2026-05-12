@@ -59,5 +59,8 @@ export function redirectToLoginOnSessionExpired(): void {
   if (typeof window === 'undefined') return;
   sessionExpiredRedirecting = true;
   useAuthStore.getState().logout();
-  window.location.replace('/login');
+  const pathname = window.location.pathname;
+  const loginPath =
+    pathname === '/demo' || pathname.startsWith('/demo/') ? '/demo/login' : '/login';
+  window.location.replace(loginPath);
 }

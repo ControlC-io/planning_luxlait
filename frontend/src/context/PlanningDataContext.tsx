@@ -8,6 +8,8 @@ import {
   type ReactNode,
 } from 'react';
 import type { PlanningDataBundle } from '@/data/planningData';
+import { useDemoMode } from '@/context/DemoModeContext';
+import { anonymizePlanningBundleForDemo } from '@/lib/demoAnonymizePlanningBundle';
 import {
   buildPlanningBundleFromApi,
   planningMonthRange,
@@ -101,6 +103,7 @@ async function fetchPlanningPayload(
 }
 
 export function PlanningDataProvider({ children }: { children: ReactNode }) {
+  const { isDemo } = useDemoMode();
   const initialYm = useMemo(() => readYearMonth(), []);
   const [planningYear, setPlanningYear] = useState(initialYm.year);
   const [planningMonthOneBased, setPlanningMonthOneBased] = useState(
@@ -114,6 +117,16 @@ export function PlanningDataProvider({ children }: { children: ReactNode }) {
   const hydrateFromPlanning = useEmployeeSkillsStore(
     (s) => s.hydrateFromPlanning,
   );
+
+  const displayedBundle = useMemo(() => {
+    if (!bundleBase) return null;
+    return isDemo ? anonymizePlanningBundleForDemo(bundleBase) : bundleBase;
+  }, [bundleBase, isDemo]);
+
+  useEffect(() => {
+    if (!displayedBundle) return;
+    hydrateFromPlanning(displayedBundle.EMPLOYEES);
+  }, [displayedBundle, hydrateFromPlanning]);
 
   const setPlanningMonth = useCallback((year: number, monthOneBased: number) => {
     setPlanningYear(year);
@@ -132,8 +145,7 @@ export function PlanningDataProvider({ children }: { children: ReactNode }) {
       planningMonthOneBased,
     );
     setBundleBase(b);
-    hydrateFromPlanning(b.EMPLOYEES);
-  }, [planningYear, planningMonthOneBased, hydrateFromPlanning]);
+  }, [planningYear, planningMonthOneBased]);
 
   useEffect(() => {
     let cancelled = false;
@@ -148,7 +160,6 @@ export function PlanningDataProvider({ children }: { children: ReactNode }) {
           planningMonthOneBased,
         );
         setBundleBase(b);
-        hydrateFromPlanning(b.EMPLOYEES);
       })
       .catch((e: unknown) => {
         if (cancelled) return;
@@ -161,26 +172,26 @@ export function PlanningDataProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [planningYear, planningMonthOneBased, hydrateFromPlanning]);
+  }, [planningYear, planningMonthOneBased]);
 
   const value = useMemo((): PlanningFullContextValue | null => {
-    if (!bundleBase) return null;
+    if (!displayedBundle) return null;
     return {
-      ...bundleBase,
+      ...displayedBundle,
       planningYear,
       planningMonthOneBased,
       setPlanningMonth,
       refetchPlanning,
     };
   }, [
-    bundleBase,
+    displayedBundle,
     planningYear,
     planningMonthOneBased,
     setPlanningMonth,
     refetchPlanning,
   ]);
 
-  if (loading && !bundleBase) {
+  if (loading && !displayedBundle) {
     return (
       <div
         style={{

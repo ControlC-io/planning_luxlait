@@ -1,5 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { useDemoMode } from '@/context/DemoModeContext';
 import { THEMES, type ThemeTokens } from '@/data/themes';
 import { useTweaks } from '@/hooks/useTweaks';
 import { EmpCell } from '@/features/planning/cells/EmpCell';
@@ -170,15 +172,11 @@ const NAV_BOTTOM: typeof NAV = [
   },
 ];
 
-function Sidebar({
-  t,
-  activePage,
-  setPage,
-}: {
-  t: ThemeTokens;
-  activePage: string;
-  setPage: (id: string) => void;
-}) {
+function Sidebar({ t }: { t: ThemeTokens }) {
+  const navigate = useNavigate();
+  const { withDemo, isDemo } = useDemoMode();
+  const pathRest = useParams()['*'] ?? '';
+  const activePage = pathRest.split('/').filter(Boolean)[0] || 'planning';
   const item = (active: boolean) => ({
     display: 'flex',
     alignItems: 'center',
@@ -217,31 +215,44 @@ function Sidebar({
           borderBottom: '1px solid rgba(255,255,255,0.06)',
         }}
       >
-        <div
-          style={{
-            width: 30,
-            height: 30,
-            borderRadius: 8,
-            backgroundColor: '#0069B4',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: 13,
-            fontWeight: 800,
-            color: '#fff',
-            flexShrink: 0,
-          }}
-        >
-          LX
-        </div>
-        <div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: t.sidebarActive }}>
-            Luxlait
+        {isDemo ? (
+          <div style={{ paddingLeft: 2, minHeight: 44, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: t.sidebarActive }}>
+              Planification
+            </div>
+            <div style={{ fontSize: 10, color: t.sidebarText, marginTop: 2 }}>
+              Vue démonstration
+            </div>
           </div>
-          <div style={{ fontSize: 10, color: t.sidebarText, marginTop: 1 }}>
-            Planification
-          </div>
-        </div>
+        ) : (
+          <>
+            <div
+              style={{
+                width: 30,
+                height: 30,
+                borderRadius: 8,
+                backgroundColor: '#0069B4',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 13,
+                fontWeight: 800,
+                color: '#fff',
+                flexShrink: 0,
+              }}
+            >
+              LX
+            </div>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: t.sidebarActive }}>
+                Luxlait
+              </div>
+              <div style={{ fontSize: 10, color: t.sidebarText, marginTop: 1 }}>
+                Planification
+              </div>
+            </div>
+          </>
+        )}
       </div>
       <div style={{ flex: 1, padding: '8px', overflowY: 'auto' }}>
         <div
@@ -261,7 +272,7 @@ function Sidebar({
             key={n.id}
             type="button"
             style={item(activePage === n.id)}
-            onClick={() => setPage(n.id)}
+            onClick={() => navigate(withDemo(`/${n.id}`))}
             onMouseEnter={(e) => {
               if (activePage !== n.id)
                 e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.05)';
@@ -292,7 +303,7 @@ function Sidebar({
             key={n.id}
             type="button"
             style={item(activePage === n.id)}
-            onClick={() => setPage(n.id)}
+            onClick={() => navigate(withDemo(`/${n.id}`))}
             onMouseEnter={(e) => {
               if (activePage !== n.id)
                 e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.05)';
@@ -313,39 +324,75 @@ function Sidebar({
           borderTop: '1px solid rgba(255,255,255,0.06)',
         }}
       >
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            padding: '8px 10px',
-            borderRadius: 7,
-          }}
-        >
+        {isDemo ? (
           <div
             style={{
-              width: 26,
-              height: 26,
-              borderRadius: '50%',
-              backgroundColor: '#0069B4',
               display: 'flex',
               alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: 11,
-              fontWeight: 700,
-              color: '#fff',
-              flexShrink: 0,
+              gap: 8,
+              padding: '8px 10px',
+              borderRadius: 7,
             }}
           >
-            MK
-          </div>
-          <div>
-            <div style={{ fontSize: 12, fontWeight: 600, color: t.sidebarActive }}>
-              M. Kremer
+            <div
+              style={{
+                width: 26,
+                height: 26,
+                borderRadius: '50%',
+                backgroundColor: '#64748B',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 11,
+                fontWeight: 700,
+                color: '#fff',
+                flexShrink: 0,
+              }}
+            >
+              A
             </div>
-            <div style={{ fontSize: 10, color: t.sidebarText }}>Manager</div>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: t.sidebarActive }}>
+                Admin
+              </div>
+              <div style={{ fontSize: 10, color: t.sidebarText }}>Compte démo</div>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '8px 10px',
+              borderRadius: 7,
+            }}
+          >
+            <div
+              style={{
+                width: 26,
+                height: 26,
+                borderRadius: '50%',
+                backgroundColor: '#0069B4',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 11,
+                fontWeight: 700,
+                color: '#fff',
+                flexShrink: 0,
+              }}
+            >
+              MK
+            </div>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: t.sidebarActive }}>
+                M. Kremer
+              </div>
+              <div style={{ fontSize: 10, color: t.sidebarText }}>Manager</div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1234,7 +1281,8 @@ export default function LuxlaitApp() {
   const t = THEMES[tweaks.theme] || THEMES.industriel;
   const compact = tweaks.density === 'compact';
 
-  const [page, setPage] = useState('planning');
+  const pathRest = useParams()['*'] ?? '';
+  const page = pathRest.split('/').filter(Boolean)[0] || 'planning';
   const [vue, setVue] = useState<'employe' | 'machine'>(tweaks.vue || 'employe');
   const [editCell, setEditCell] = useState<{ empId: string; day: number } | null>(
     null,
@@ -1287,7 +1335,7 @@ export default function LuxlaitApp() {
         backgroundColor: t.bodyBg,
       }}
     >
-      <Sidebar t={t} activePage={page} setPage={setPage} />
+      <Sidebar t={t} />
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         {page === 'planning' && (

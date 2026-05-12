@@ -1,5 +1,6 @@
 import { FormEvent, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import { useDemoMode } from '@/context/DemoModeContext';
 import { verifyEmailOtp } from '@/lib/authClient';
 
 type OtpChallengePageProps = {
@@ -12,6 +13,7 @@ export default function OtpChallengePage({
   subtitle = 'Saisissez le code à 6 chiffres envoyé par email.',
 }: OtpChallengePageProps) {
   const navigate = useNavigate();
+  const { withDemo } = useDemoMode();
   const location = useLocation();
   const state = location.state as { userId?: string; email?: string } | undefined;
   const userId = state?.userId;
@@ -45,14 +47,14 @@ export default function OtpChallengePage({
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (!userId) {
-      navigate('/login');
+      navigate(withDemo('/login'));
       return;
     }
     setError('');
     setBusy(true);
     try {
       await verifyEmailOtp(userId, code.trim());
-      navigate('/');
+      navigate(withDemo('/'));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Erreur');
     } finally {

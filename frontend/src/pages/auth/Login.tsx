@@ -1,9 +1,11 @@
 import { FormEvent, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useDemoMode } from '@/context/DemoModeContext';
 import { loginWithPassword } from '@/lib/authClient';
 
 export default function LoginPage() {
   const navigate = useNavigate();
+  const { isDemo, withDemo } = useDemoMode();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -16,11 +18,11 @@ export default function LoginPage() {
     try {
       const r = await loginWithPassword(email.trim(), password);
       if (r.requires2FA) {
-        navigate('/auth/email-otp', {
+        navigate(withDemo('/auth/email-otp'), {
           state: { userId: r.userId, email: email.trim() },
         });
       } else {
-        navigate('/');
+        navigate(withDemo('/'));
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Erreur');
@@ -53,25 +55,27 @@ export default function LoginPage() {
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
-          <div
-            style={{
-              width: 30,
-              height: 30,
-              borderRadius: 8,
-              backgroundColor: '#0069B4',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: 13,
-              fontWeight: 800,
-              color: '#fff',
-            }}
-          >
-            LX
-          </div>
+          {!isDemo && (
+            <div
+              style={{
+                width: 30,
+                height: 30,
+                borderRadius: 8,
+                backgroundColor: '#0069B4',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 13,
+                fontWeight: 800,
+                color: '#fff',
+              }}
+            >
+              LX
+            </div>
+          )}
           <div>
             <div style={{ fontSize: 16, fontWeight: 700, color: '#0F172A' }}>
-              Luxlait Planification
+              {isDemo ? 'Planification' : 'Luxlait Planification'}
             </div>
             <div style={{ fontSize: 12, color: '#64748B', marginTop: 2 }}>
               Connectez-vous à votre compte
