@@ -19,16 +19,19 @@ services:
       - "5432"
     restart: unless-stopped
     healthcheck:
-      # pg_isready does not check the password; psql does (catches P1000 / env vs volume mismatch).
+      # pg_isready only checks that Postgres accepts connections (not password correctness).
+      # If POSTGRES_PASSWORD in Coolify does not match the existing postgres_data volume,
+      # the stack will start but the backend will log Prisma P1000 — delete the volume or
+      # restore the original password (see .env.example).
       test:
         [
           'CMD-SHELL',
-          'PGPASSWORD="$$POSTGRES_PASSWORD" psql -h postgres -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "SELECT 1" >/dev/null 2>&1 || exit 1',
+          'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" || exit 1',
         ]
       interval: 5s
       timeout: 5s
-      retries: 5
-      start_period: 10s
+      retries: 10
+      start_period: 30s
 
   email_service:
     build:
