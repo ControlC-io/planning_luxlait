@@ -12,9 +12,12 @@ export default defineConfig({
   server: {
     host: true,
     port: 5173,
+    // Allow any host so dev server works behind Coolify / reverse proxies
+    // (sslip.io domains, custom domains, etc.).
+    allowedHosts: true,
     proxy: {
       '/api': {
-        target: process.env.BACKEND_PROXY_URL ?? 'http://localhost:3000',
+        target: (process.env.BACKEND_PROXY_URL ?? 'http://localhost:3000').trim(),
         changeOrigin: true,
       },
     },

@@ -15,10 +15,12 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-luxlait_db}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      # Expose port for local development and Prisma CLI
-      # Comment out this line in production for maximum security
-      - "5432:5432"
+    # Internal only: reachable by other services on internal_net, never on the host.
+    # Uncomment the ports block below if you need Prisma CLI from your host machine.
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+    expose:
+      - "5432"
     networks:
       - internal_net
     restart: unless-stopped
@@ -54,10 +56,15 @@ services:
     volumes:
       - ./backend:/app
       - /app/node_modules
-    ports:
-      - "3000:3000"
-      # Expose Prisma Studio port for development
-      - "5555:5555"
+    # Backend is reached by the frontend via Vite's /api proxy on the internal
+    # Docker network (http://backend:3000). No public host port is required.
+    # Uncomment to expose for local Prisma Studio / direct API access on the host:
+    # ports:
+    #   - "127.0.0.1:3000:3000"
+    #   - "127.0.0.1:5555:5555"
+    expose:
+      - "3000"
+      - "5555"
     networks:
       - internal_net
     depends_on:
@@ -77,11 +84,19 @@ services:
     environment:
       NODE_ENV: ${NODE_ENV:-development}
       BACKEND_PROXY_URL: ${BACKEND_PROXY_URL:-http://backend:3000}
+      # Coolify magic variable: declaring it here tells Coolify to route the
+      # generated FQDN to this service on port 5173. Coolify substitutes
+      # SERVICE_FQDN_FRONTEND_5173 at deploy time.
+      SERVICE_FQDN_FRONTEND_5173: ${SERVICE_FQDN_FRONTEND_5173:-}
     volumes:
       - ./frontend:/app
       - /app/node_modules
-    ports:
-      - "5173:5173"
+    expose:
+      - "5173"
+    # On a plain `docker compose up` (outside Coolify) you can publish the
+    # dev server on the host by uncommenting:
+    # ports:
+    #   - "5173:5173"
     networks:
       - internal_net
     restart: unless-stopped
