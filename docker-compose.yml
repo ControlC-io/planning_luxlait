@@ -86,16 +86,11 @@ services:
       BOOTSTRAP_ON_BOOT: ${BOOTSTRAP_ON_BOOT:-true}
     expose:
       - "3000"
-    healthcheck:
-      test:
-        [
-          'CMD-SHELL',
-          'wget -q -O /dev/null http://127.0.0.1:3000/api || exit 1',
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 120s
+    # No healthcheck: Coolify aborts the deploy if the backend is not healthy
+    # before its timeout, and the bootstrap (prisma generate + migrate +
+    # seed reference data) can take several minutes on a fresh DB. The
+    # frontend only proxies /api, so it can start in parallel and will
+    # retry until the API is up. Inspect backend logs to diagnose issues.
     depends_on:
       postgres:
         condition: service_healthy
@@ -117,7 +112,7 @@ services:
       - "5173"
     depends_on:
       backend:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
 
 volumes:
