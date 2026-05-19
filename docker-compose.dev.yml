@@ -1,0 +1,27 @@
+# Local development overrides (bind mounts + host ports).
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  backend:
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:5555:5555"
+
+  frontend:
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+
+  email_service:
+    volumes:
+      - ./email_service:/app
+      - /app/node_modules
