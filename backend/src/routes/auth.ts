@@ -161,9 +161,11 @@ router.post('/token', async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
+  const normalizedEmail = email.trim().toLowerCase();
+
   try {
     const user = await prisma.user.findUnique({
-      where: { email },
+      where: { email: normalizedEmail },
       include: {
         accounts: {
           where: { providerId: 'credential' },
@@ -227,7 +229,12 @@ router.post('/token', async (req: Request, res: Response): Promise<void> => {
     res.json({ token, expiresIn, user: { id: user.id, email: user.email, name: user.name, roles } });
   } catch (error) {
     console.error('Error issuing token:', error);
-    res.status(500).json({ error: 'Failed to issue token' });
+    const message = error instanceof Error ? error.message : 'Failed to issue token';
+    const isDev = process.env.NODE_ENV !== 'production';
+    res.status(500).json({
+      error: 'Failed to issue token',
+      ...(isDev ? { detail: message } : {}),
+    });
   }
 });
 
