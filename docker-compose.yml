@@ -19,11 +19,16 @@ services:
       - "5432"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-luxlait_db}"]
-      interval: 3s
+      # pg_isready does not check the password; psql does (catches P1000 / env vs volume mismatch).
+      test:
+        [
+          'CMD-SHELL',
+          'PGPASSWORD="$$POSTGRES_PASSWORD" psql -h postgres -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "SELECT 1" >/dev/null 2>&1 || exit 1',
+        ]
+      interval: 5s
       timeout: 5s
       retries: 5
-      start_period: 5s
+      start_period: 10s
 
   email_service:
     build:
@@ -58,7 +63,10 @@ services:
     # remove prisma/schema.prisma. Use docker-compose.dev.yml for local bind mounts only.
     environment:
       NODE_ENV: ${NODE_ENV:-development}
-      DATABASE_URL: ${DATABASE_URL:?}
+      # Built from POSTGRES_* so credentials cannot drift from the postgres service.
+      # In Coolify: set POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB only — remove
+      # a separate DATABASE_URL unless you know it matches the existing DB volume.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-luxlait_db}?schema=public
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?}
       BETTER_AUTH_URL: ${BETTER_AUTH_URL:?}
       TRUSTED_ORIGINS: ${TRUSTED_ORIGINS:?}
