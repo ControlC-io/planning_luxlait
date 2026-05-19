@@ -54,6 +54,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    # Do not add bind mounts here (Coolify Storage → /app). They replace the image and
+    # remove prisma/schema.prisma. Use docker-compose.dev.yml for local bind mounts only.
     environment:
       NODE_ENV: ${NODE_ENV:-development}
       DATABASE_URL: ${DATABASE_URL:?}

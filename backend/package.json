@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Luxlait Planning backend API (Express + Prisma + Better Auth)",
   "main": "dist/index.js",
+  "prisma": {
+    "schema": "prisma/schema.prisma"
+  },
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "build": "tsc",
@@ -28,7 +31,8 @@
     "express": "^4.18.2",
     "jsonwebtoken": "^9.0.3",
     "swagger-jsdoc": "^6.2.8",
-    "swagger-ui-express": "^5.0.1"
+    "swagger-ui-express": "^5.0.1",
+    "prisma": "^5.9.0"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
@@ -38,7 +42,6 @@
     "@types/node": "^20.11.0",
     "@types/swagger-jsdoc": "^6.0.4",
     "@types/swagger-ui-express": "^4.1.8",
-    "prisma": "^5.9.0",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.3.3"
   }

@@ -1,12 +1,30 @@
 #!/bin/sh
 set -e
 
-# Host mounts ./backend over /app; schema.prisma updates but node_modules may be a stale
-# anonymous volume from an older image. Regenerate Prisma Client so delegates match schema.
-npx prisma generate
+cd /app
+
+PRISMA_SCHEMA="./prisma/schema.prisma"
+PRISMA_BIN="./node_modules/.bin/prisma"
+
+if [ ! -f "$PRISMA_SCHEMA" ]; then
+  echo "[entrypoint] ERROR: $PRISMA_SCHEMA not found (pwd=$(pwd))."
+  echo "[entrypoint] A volume or bind mount is likely overriding /app with an empty directory."
+  echo "[entrypoint] On Coolify: remove any Storage / bind mount on the backend service."
+  echo "[entrypoint] Use docker-compose.yml only (not docker-compose.dev.yml) for deployment."
+  exit 1
+fi
+
+# Use the project-local Prisma CLI (v5). Avoid 'npx prisma' — if node_modules is empty it
+# downloads Prisma 7 and fails with confusing schema / prisma.config.ts errors.
+if [ ! -x "$PRISMA_BIN" ]; then
+  echo "[entrypoint] Prisma CLI not found; installing dependencies..."
+  npm install --include=dev
+fi
+
+"$PRISMA_BIN" generate --schema="$PRISMA_SCHEMA"
 
 # Apply SQL migrations (idempotent) so new tables are present after git pull.
-npx prisma migrate deploy
+"$PRISMA_BIN" migrate deploy --schema="$PRISMA_SCHEMA"
 
 # Production bootstrap: creates the admin account and seeds the Luxlait
 # reference data on a fresh VM. Each step is idempotent: existing users,
