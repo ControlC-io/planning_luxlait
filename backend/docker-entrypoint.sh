@@ -24,7 +24,19 @@ fi
 "$PRISMA_BIN" generate --schema="$PRISMA_SCHEMA"
 
 # Apply SQL migrations (idempotent) so new tables are present after git pull.
-"$PRISMA_BIN" migrate deploy --schema="$PRISMA_SCHEMA"
+if ! "$PRISMA_BIN" migrate deploy --schema="$PRISMA_SCHEMA" 2>&1; then
+  echo ""
+  echo "[entrypoint] Prisma migrate deploy failed."
+  echo "[entrypoint] If you see P1000, POSTGRES_PASSWORD in Coolify does not match the"
+  echo "[entrypoint] password stored in the postgres_data volume (Postgres only applies"
+  echo "[entrypoint] POSTGRES_PASSWORD on first init)."
+  echo "[entrypoint]"
+  echo "[entrypoint] Fix on the Coolify server (SSH):"
+  echo "[entrypoint]   sh scripts/coolify-fix-p1000.sh 'postgres' zdbhyyhegz6ojbpdwa5pk48y"
+  echo "[entrypoint] Or wipe the DB: stop stack, delete volume zdbhyyhegz6ojbpdwa5pk48y_postgres_data, redeploy."
+  echo "[entrypoint] Also remove DATABASE_URL from Coolify env — compose builds it from POSTGRES_*."
+  exit 1
+fi
 
 # Production bootstrap: creates the admin account and seeds the Luxlait
 # reference data on a fresh VM. Each step is idempotent: existing users,
