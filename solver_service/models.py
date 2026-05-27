@@ -143,6 +143,15 @@ class SolveRequest(BaseModel):
     # these assignments but is free to deviate when necessary.
     reference_assignments: List[ExistingAssignmentInput] = []
 
+    # Assignments from days OUTSIDE [from_date, to_date] that belong to the
+    # same ISO week as a boundary day of the planning window (i.e. the partial
+    # weeks at the start and end of the period).  These are never re-planned
+    # but they DO count toward:
+    #   • max_work_days_per_week  (they already consumed work-days that week)
+    #   • min_rest_days_per_week  (they make partial weeks effectively full)
+    #   • max_consecutive_work_days (they extend the run of consecutive days)
+    boundary_assignments: List[ExistingAssignmentInput] = []
+
     constraints: ConstraintsInput = Field(default_factory=ConstraintsInput)
 
     # Freeform metadata to support future rules and debugging

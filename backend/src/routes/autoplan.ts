@@ -474,6 +474,60 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       }
     }
 
+    // ── Boundary assignments ──────────────────────────────────────────────────
+    // Fetch assignments from days that are outside [from, to] but belong to
+    // the same ISO week as the start or end of the planning window (partial
+    // boundary weeks). The solver uses them to count already-worked days
+    // toward weekly and consecutive caps without re-planning those days.
+    const getMondayOfIsoWeek = (d: Date): Date => {
+      const dow = (d.getUTCDay() + 6) % 7; // 0 = Mon … 6 = Sun
+      const m = new Date(d);
+      m.setUTCDate(d.getUTCDate() - dow);
+      return m;
+    };
+    const getSundayOfIsoWeek = (d: Date): Date => {
+      const dow = (d.getUTCDay() + 6) % 7;
+      const s = new Date(d);
+      s.setUTCDate(d.getUTCDate() + (6 - dow));
+      return s;
+    };
+
+    const weekStart = getMondayOfIsoWeek(from);
+    const weekEnd = getSundayOfIsoWeek(to);
+
+    const boundaryDates: Date[] = [];
+    // Pre-window days: Monday of start-week up to day before `from`
+    for (const cur = new Date(weekStart); cur < from; cur.setUTCDate(cur.getUTCDate() + 1)) {
+      boundaryDates.push(new Date(cur));
+    }
+    // Post-window days: day after `to` up to Sunday of end-week
+    const dayAfterTo = new Date(to);
+    dayAfterTo.setUTCDate(to.getUTCDate() + 1);
+    for (const cur = new Date(dayAfterTo); cur <= weekEnd; cur.setUTCDate(cur.getUTCDate() + 1)) {
+      boundaryDates.push(new Date(cur));
+    }
+
+    let boundaryAssignmentRows: Array<{
+      day_date: string;
+      employee_id: string;
+      machine_id: string;
+      time_slot_id: string | null;
+    }> = [];
+
+    if (boundaryDates.length > 0) {
+      const minBoundary = boundaryDates[0]!;
+      const maxBoundary = boundaryDates[boundaryDates.length - 1]!;
+      const rawBoundary = await prisma.luxlaitDailyAssignment.findMany({
+        where: { dayDate: { gte: minBoundary, lte: maxBoundary } },
+      });
+      boundaryAssignmentRows = (rawBoundary as any[]).map((a) => ({
+        day_date: (a.dayDate as Date).toISOString().slice(0, 10),
+        employee_id: a.employeeId,
+        machine_id: a.machineId,
+        time_slot_id: a.timeSlotId ?? null,
+      }));
+    }
+
     const solverFromDate = isReplan ? from.toISOString().slice(0, 10) : body.fromDate;
     const solverToDate = isReplan ? to.toISOString().slice(0, 10) : body.toDate;
 
@@ -513,6 +567,7 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       machine_shift_min_requirements: expandedMinRequirements,
       existing_assignments: lockedAssignmentRows,
       reference_assignments: referenceAssignmentRows,
+      boundary_assignments: boundaryAssignmentRows,
       constraints: {
         fairness_weight: body.constraints?.fairness_weight ?? dbFairnessWeight,
         priority_machine_weight:

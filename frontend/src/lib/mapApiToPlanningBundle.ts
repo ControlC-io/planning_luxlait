@@ -340,12 +340,12 @@ export function buildPlanningBundleFromApi(
   }
 
   const now = new Date();
-  let TODAY = 1;
-  if (now.getFullYear() === year && now.getMonth() === MONTH_IDX) {
-    TODAY = now.getDate();
-  } else {
-    TODAY = Math.min(14, DAYS);
-  }
+  // TODAY is only meaningful within the currently displayed month.
+  // For past or future months there is no "today" to highlight.
+  const TODAY =
+    now.getFullYear() === year && now.getMonth() === MONTH_IDX
+      ? now.getDate()
+      : 0;
 
   return {
     SHIFTS,

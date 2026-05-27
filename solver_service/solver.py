@@ -145,6 +145,28 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
 
         locked_emp_days: Set[Tuple[str, dt.date]] = set(locked.keys())
 
+        # ── Boundary assignments (days outside the planning window) ──────────
+        # These are assignments from the partial ISO weeks at the start/end of
+        # the planning period. They are never re-planned but count toward
+        # weekly and consecutive caps so constraints are not artificially
+        # relaxed for boundary weeks.
+        boundary_emp_days: Set[Tuple[str, dt.date]] = set()
+        for a in req.boundary_assignments:
+            bd = _parse_date_yyyy_mm_dd(a.day_date)
+            if a.employee_id in employee_id_set and bd not in days_set:
+                boundary_emp_days.add((a.employee_id, bd))
+
+        # Pre-sort boundary dates for use in the consecutive constraint.
+        all_boundary_dates: List[dt.date] = sorted(set(d for (_, d) in boundary_emp_days))
+        pre_boundary_dates = [d for d in all_boundary_dates if d < from_date]
+        post_boundary_dates = [d for d in all_boundary_dates if d > to_date]
+
+        # Boundary dates grouped by ISO week key for the weekly cap.
+        boundary_dates_by_iso_week: Dict[Tuple[int, int], List[dt.date]] = defaultdict(list)
+        for d in all_boundary_dates:
+            iso_y, iso_w, _ = d.isocalendar()
+            boundary_dates_by_iso_week[(iso_y, iso_w)].append(d)
+
         # Locked assignments represent the user's accepted plan. Skip
         # validation so pre-existing inconsistencies do not block re-plans.
 
@@ -219,8 +241,14 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
         if max_work_days_per_week > 0 or min_rest_days_per_week > 0:
             for e_id in employee_ids:
                 for _week_key, week_days in days_by_iso_week.items():
-                    locked_count_in_week = sum(
-                        1 for d in week_days if (e_id, d) in locked_emp_days
+                    # Boundary days in the same ISO week (outside the planning window).
+                    boundary_in_week = boundary_dates_by_iso_week.get(_week_key, [])
+
+                    # Pre-decided work days: locked rows inside the window +
+                    # boundary assignments outside the window (already happened).
+                    locked_count_in_week = (
+                        sum(1 for d in week_days if (e_id, d) in locked_emp_days)
+                        + sum(1 for d in boundary_in_week if (e_id, d) in boundary_emp_days)
                     )
                     solver_lits = [
                         assigned_any[(e_id, d)]
@@ -228,15 +256,21 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                         if (e_id, d) in assigned_any
                     ]
 
+                    # Full ISO week length as seen by the solver: planning-window
+                    # days + boundary days outside the window.  When both sides
+                    # sum to 7 the week is complete and every weekly rule applies.
+                    full_week_len = len(week_days) + len(boundary_in_week)
+
                     week_caps: List[int] = []
                     if max_work_days_per_week > 0:
                         week_caps.append(max_work_days_per_week)
-                    if min_rest_days_per_week > 0:
-                        # Cap derived from the legal floor of off days.
-                        # Apply only inside the planning window of this
-                        # week so partial weeks are not forced to extra off
-                        # days they cannot take.
-                        week_caps.append(max(0, len(week_days) - min_rest_days_per_week))
+                    if min_rest_days_per_week > 0 and full_week_len == 7:
+                        # Only enforce on complete ISO weeks (window days +
+                        # boundary days = 7).  For still-partial weeks the
+                        # rest days may fall entirely outside the planning
+                        # range; forcing extra rest inside would cut capacity
+                        # artificially.
+                        week_caps.append(max(0, 7 - min_rest_days_per_week))
 
                     if not week_caps:
                         continue
@@ -244,10 +278,10 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                     effective_cap = min(week_caps)
                     remaining = effective_cap - locked_count_in_week
                     if remaining <= 0:
-                        # Locked plan already saturates the cap. Force every
-                        # solver decided day off. We do not error out: locked
-                        # rows are accepted by the user and may pre-violate
-                        # the cap.
+                        # Pre-decided days already saturate the cap. Force
+                        # every solver-decided day off.  We do not error out:
+                        # locked rows are accepted by the user and may
+                        # pre-violate the cap.
                         for lit in solver_lits:
                             model.add(lit == 0)
                         continue
@@ -255,28 +289,38 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                     if solver_lits:
                         model.add(sum(solver_lits) <= remaining)
 
-        if max_consecutive_work_days > 0 and len(days) > max_consecutive_work_days:
+        if max_consecutive_work_days > 0:
             window_size = max_consecutive_work_days + 1
-            for e_id in employee_ids:
-                for start in range(len(days) - max_consecutive_work_days):
-                    window = days[start : start + window_size]
-                    locked_in_window = sum(
-                        1 for d in window if (e_id, d) in locked_emp_days
-                    )
-                    solver_lits_window = [
-                        assigned_any[(e_id, d)]
-                        for d in window
-                        if (e_id, d) in assigned_any
-                    ]
+            # Extend the day sequence with boundary days adjacent to the
+            # planning window so consecutive runs that straddle the boundary
+            # are counted correctly.
+            extended_days = pre_boundary_dates + days + post_boundary_dates
+            if len(extended_days) > max_consecutive_work_days:
+                for e_id in employee_ids:
+                    for start in range(len(extended_days) - max_consecutive_work_days):
+                        window = extended_days[start : start + window_size]
+                        # Count all pre-decided work days in this window:
+                        # locked rows inside the planning window and boundary
+                        # assignments outside it.
+                        pre_decided = sum(
+                            1 for d in window
+                            if (d not in days_set and (e_id, d) in boundary_emp_days)
+                            or (d in days_set and (e_id, d) in locked_emp_days)
+                        )
+                        solver_lits_window = [
+                            assigned_any[(e_id, d)]
+                            for d in window
+                            if d in days_set and (e_id, d) in assigned_any
+                        ]
 
-                    remaining = max_consecutive_work_days - locked_in_window
-                    if remaining <= 0:
-                        for lit in solver_lits_window:
-                            model.add(lit == 0)
-                        continue
+                        remaining = max_consecutive_work_days - pre_decided
+                        if remaining <= 0:
+                            for lit in solver_lits_window:
+                                model.add(lit == 0)
+                            continue
 
-                    if solver_lits_window:
-                        model.add(sum(solver_lits_window) <= remaining)
+                        if solver_lits_window:
+                            model.add(sum(solver_lits_window) <= remaining)
 
         # ── Shared overlap cache: ov[(e,d,m,ts)] = x[(e,d,m)] AND t[(e,d,ts)] ─
         overlap_cache: Dict[Tuple[str, dt.date, str, str], cp_model.IntVar] = {}
