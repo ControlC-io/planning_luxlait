@@ -107,6 +107,7 @@ const Av = ({
 export function PageEmployes({ t }: PageProps) {
   const PLANNING_DATA = usePlanningData();
   const { EMPLOYEES, MACHINES, GROUPS, assignments, DAYS, isWeekend, MONTH_LABEL } = PLANNING_DATA;
+  const monthlyTarget = 21;
   const [search,   setSearch]  = useState('');
   const [group,    setGroup]   = useState('');
   const [page,     setPage]    = useState(0);
@@ -143,6 +144,19 @@ export function PageEmployes({ t }: PageProps) {
   };
 
   const workdays = Array.from({length:DAYS},(_,i)=>i+1).filter(d=>!isWeekend(d)).length;
+  const monthlyTotalsByEmployee = useMemo(() => {
+    const totals = new Map();
+    for (const emp of EMPLOYEES) {
+      let total = 0;
+      for (let day = 1; day <= DAYS; day++) {
+        const a = assignments[`${emp.id}-${day}`];
+        if (!a) continue;
+        if (a.type === 'work' || a.type === 'status') total += 1;
+      }
+      totals.set(emp.id, total);
+    }
+    return totals;
+  }, [EMPLOYEES, DAYS, assignments]);
 
   const sel = selected ? EMPLOYEES.find(e=>e.id===selected) : null;
 
@@ -222,11 +236,18 @@ export function PageEmployes({ t }: PageProps) {
               const sc   = shiftCount(emp);
               const pct  = Math.round(sc/workdays*100);
               const isS  = selected === emp.id;
+              const monthlyTotal = monthlyTotalsByEmployee.get(emp.id) ?? 0;
+              const isOffMonthlyTarget = monthlyTotal !== monthlyTarget;
+              const monthlyAlertTitle = isOffMonthlyTarget
+                ? `Total mensuel différent de la cible: ${monthlyTotal} jours (travail + congé). Cible: ${monthlyTarget}.`
+                : undefined;
               return (
                 <div key={emp.id} onClick={() => setSelected(isS ? null : emp.id)}
+                  title={monthlyAlertTitle}
                   style={{ display:'flex', alignItems:'center', gap:12, padding:'12px 14px',
                     borderRadius:10, cursor:'pointer',
-                    border:`2px solid ${isS ? t.primaryBtn : '#E5E7EB'}`,
+                    border:`2px solid ${isS ? t.primaryBtn : isOffMonthlyTarget ? '#DC2626' : '#E5E7EB'}`,
+                    boxShadow: isOffMonthlyTarget ? 'inset 0 0 0 1px rgba(220, 38, 38, 0.35)' : undefined,
                     backgroundColor: isS ? '#F0F7FF' : '#fff',
                     transition:'all 0.1s' }}>
                   <Av emp={emp} backup={emp.backup} size={36} />

@@ -104,21 +104,32 @@ class ConstraintsInput(BaseModel):
     # Hard cap on the number of work days a single employee can be scheduled
     # for inside a given ISO calendar week (Monday to Sunday).
     # Locked assignments count toward this limit. Set to 0 to disable.
-    # Default 6 matches Luxembourg labor code L. 231 3 (44h consecutive
-    # weekly rest, equivalent to one full day off per week).
-    max_work_days_per_week: int = Field(default=6, ge=0, le=7)
+    # Default 5 means 40h per week with 8h shifts.
+    max_work_days_per_week: int = Field(default=5, ge=0, le=7)
 
     # Legal floor on the number of off days in any ISO calendar week.
     # Code du travail luxembourgeois article L. 231 3 mandates a continuous
     # weekly rest of 44 hours, so at least one full day off per week.
     # Locked assignments are counted toward the cap. Set to 0 to disable.
-    min_rest_days_per_week: int = Field(default=1, ge=0, le=7)
+    min_rest_days_per_week: int = Field(default=2, ge=0, le=7)
 
     # Maximum number of consecutive working days for a single employee.
     # Implements the spirit of L. 231 3 by guaranteeing at least one rest
     # day inside any rolling window of (max_consecutive_work_days + 1) days.
     # Locked assignments are counted. Set to 0 to disable.
-    max_consecutive_work_days: int = Field(default=6, ge=0, le=14)
+    max_consecutive_work_days: int = Field(default=5, ge=0, le=14)
+
+    # Penalize worked days that are marked as preferred off around leave blocks.
+    leave_weekend_protection_weight: int = Field(default=20, ge=0)
+
+    # Target monthly worked plus leave days. Used as the soft objective target.
+    # Set to 0 to disable the soft monthly objective entirely.
+    exact_monthly_worked_plus_leaves_days: int = Field(default=21, ge=0, le=31)
+
+    # Penalty per day of deviation from exact_monthly_worked_plus_leaves_days.
+    # Applied as a soft objective (both over and under are penalized).
+    # Set to 0 to disable.
+    monthly_soft_target_weight: int = Field(default=50, ge=0)
 
 
 class SolveRequest(BaseModel):
@@ -132,6 +143,7 @@ class SolveRequest(BaseModel):
 
     # Each entry means the employee is unavailable on that day
     unavailable_days: List[UnavailableDayInput] = []
+    preferred_off_days: List[UnavailableDayInput] = []
     unavailable_shifts: List[UnavailableShiftInput] = []
     machine_closed_shifts: List[MachineClosedShiftInput] = []
     machine_shift_min_requirements: List[MachineShiftMinRequirementInput] = []

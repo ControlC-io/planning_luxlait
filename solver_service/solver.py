@@ -111,6 +111,10 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
         for u in req.unavailable_shifts:
             u_day = _parse_date_yyyy_mm_dd(u.day_date)
             unavailable_shift.add((u.employee_id, u_day, u.time_slot_id))
+        preferred_off_days: Set[Tuple[str, dt.date]] = set()
+        for u in req.preferred_off_days:
+            u_day = _parse_date_yyyy_mm_dd(u.day_date)
+            preferred_off_days.add((u.employee_id, u_day))
 
         machine_closed_shift: Set[Tuple[str, dt.date, str]] = set()
         for row in req.machine_closed_shifts:
@@ -144,6 +148,10 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
                 locked[(a.employee_id, ad)] = a
 
         locked_emp_days: Set[Tuple[str, dt.date]] = set(locked.keys())
+        target_monthly_worked_plus_leaves = int(
+            req.constraints.exact_monthly_worked_plus_leaves_days
+        )
+        non_backup_employee_ids = [e.id for e in employees if not e.is_backup]
 
         # ── Boundary assignments (days outside the planning window) ──────────
         # These are assignments from the partial ISO weeks at the start/end of
@@ -194,6 +202,10 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
             for e_id in emp_set:
                 if e_id in machines_for_employee:
                     machines_for_employee[e_id].add(m_id)
+        skilled_non_backup_employee_ids = [
+            e_id for e_id in non_backup_employee_ids
+            if len(machines_for_employee.get(e_id, set())) > 0
+        ]
 
         for e_id in employee_ids:
             for d in days:
@@ -752,6 +764,7 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
         polyvalent_a_weight = req.constraints.polyvalent_in_autonomous_bonus_weight
         polyvalent_f_weight = req.constraints.polyvalent_in_training_bonus_weight
         extra_coverage_weight = req.constraints.extra_coverage_penalty_weight
+        leave_weekend_protection_weight = req.constraints.leave_weekend_protection_weight
 
         priority_shift_covered_sum = (
             sum(priority_shift_covered_vars) if priority_shift_covered_vars else 0
@@ -888,6 +901,32 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
         extra_coverage_total = (
             sum(extra_coverage_vars) if extra_coverage_vars else 0
         )
+        leave_weekend_protection_total = sum(
+            assigned_var
+            for (e_id, d), assigned_var in assigned_any.items()
+            if (e_id, d) in preferred_off_days
+        )
+
+        # Soft monthly target: penalize deviation from target for skilled non backup employees.
+        # Both excess (over) and shortage (under) are penalized symmetrically.
+        monthly_soft_target_weight = req.constraints.monthly_soft_target_weight
+        monthly_deviation_vars: List[cp_model.IntVar] = []
+        if target_monthly_worked_plus_leaves > 0 and monthly_soft_target_weight > 0:
+            for e_id in skilled_non_backup_employee_ids:
+                leave_count = sum(1 for d in days if (e_id, d) in unavailable)
+                locked_c = sum(1 for d in days if (e_id, d) in locked_emp_days)
+                worked_lits = [assigned_any[(e_id, d)] for d in days if (e_id, d) in assigned_any]
+                tgt = target_monthly_worked_plus_leaves
+                if worked_lits:
+                    total_expr = sum(worked_lits) + locked_c + leave_count
+                else:
+                    total_expr = locked_c + leave_count
+                over = model.new_int_var(0, 31, f"monthly_over_{e_id}")
+                under = model.new_int_var(0, 31, f"monthly_under_{e_id}")
+                model.add_max_equality(over, [total_expr - tgt, 0])
+                model.add_max_equality(under, [tgt - total_expr, 0])
+                monthly_deviation_vars.extend([over, under])
+        monthly_deviation_total = sum(monthly_deviation_vars) if monthly_deviation_vars else 0
 
         objective = (
             fairness_weight * fairness_cost
@@ -897,6 +936,8 @@ def solve_cp_sat(req: SolveRequest) -> SolveResponse:
             - polyvalent_a_weight * polyvalent_a_bonus
             - polyvalent_f_weight * polyvalent_f_bonus
             + extra_coverage_weight * extra_coverage_total
+            + leave_weekend_protection_weight * leave_weekend_protection_total
+            + monthly_soft_target_weight * monthly_deviation_total
         )
         model.minimize(objective)
 

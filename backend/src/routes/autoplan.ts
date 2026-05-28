@@ -6,6 +6,13 @@ const router = express.Router();
 const parseYYYYMMDD = (s: string): Date => new Date(`${s}T00:00:00.000Z`);
 const toYYYYMMDD = (d: Date): string => d.toISOString().slice(0, 10);
 const GLOBAL_SHIFT_MIN_DATE = parseYYYYMMDD("1970-01-01");
+const ONE_DAY_MS = 86_400_000;
+
+type SolverUnavailableDay = {
+  employee_id: string;
+  day_date: string;
+  status_id: string | null;
+};
 
 function listDateRange(from: Date, to: Date): string[] {
   const dates: string[] = [];
@@ -15,6 +22,52 @@ function listDateRange(from: Date, to: Date): string[] {
     cursor.setUTCDate(cursor.getUTCDate() + 1);
   }
   return dates;
+}
+
+function computeLeaveWeekendProtection(
+  unavailableDays: SolverUnavailableDay[],
+  from: Date,
+  to: Date
+): { preferredOffDays: SolverUnavailableDay[] } {
+  const unavailableKeySet = new Set<string>();
+  const preferredOffKeys = new Set<string>();
+  for (const row of unavailableDays) {
+    const day = parseYYYYMMDD(row.day_date);
+    const dayKey = `${row.employee_id}|${row.day_date}`;
+    unavailableKeySet.add(dayKey);
+
+    // Monday leave -> previous weekend preferred off.
+    if (day.getUTCDay() === 1) {
+      const saturday = new Date(day.getTime() - 2 * ONE_DAY_MS);
+      const sunday = new Date(day.getTime() - ONE_DAY_MS);
+      preferredOffKeys.add(`${row.employee_id}|${toYYYYMMDD(saturday)}`);
+      preferredOffKeys.add(`${row.employee_id}|${toYYYYMMDD(sunday)}`);
+    }
+
+    // Friday leave -> next weekend preferred off.
+    if (day.getUTCDay() === 5) {
+      const saturday = new Date(day.getTime() + ONE_DAY_MS);
+      const sunday = new Date(day.getTime() + 2 * ONE_DAY_MS);
+      preferredOffKeys.add(`${row.employee_id}|${toYYYYMMDD(saturday)}`);
+      preferredOffKeys.add(`${row.employee_id}|${toYYYYMMDD(sunday)}`);
+    }
+  }
+
+  const inRange = (dayStr: string): boolean => {
+    const day = parseYYYYMMDD(dayStr).getTime();
+    return day >= from.getTime() && day <= to.getTime();
+  };
+
+  const preferredOffDays: SolverUnavailableDay[] = [];
+  for (const key of preferredOffKeys) {
+    const [employeeId, dayDate] = key.split("|");
+    if (!employeeId || !dayDate) continue;
+    if (!inRange(dayDate)) continue;
+    if (unavailableKeySet.has(key)) continue;
+    preferredOffDays.push({ employee_id: employeeId, day_date: dayDate, status_id: null });
+  }
+
+  return { preferredOffDays };
 }
 
 /**
@@ -106,6 +159,9 @@ const SOLVER_SETTING_KEYS = {
   maxWorkDaysPerWeek: "planning_solver_max_work_days_per_week",
   minRestDaysPerWeek: "planning_solver_min_rest_days_per_week",
   maxConsecutiveWorkDays: "planning_solver_max_consecutive_work_days",
+  leaveWeekendProtectionWeight: "planning_solver_leave_weekend_protection_weight",
+  exactMonthlyWorkedPlusLeavesDays: "planning_solver_exact_monthly_worked_plus_leaves_days",
+  monthlySoftTargetWeight: "planning_solver_monthly_soft_target_weight",
 } as const;
 
 function readNumberFromProviderConfig(config: unknown, defaultValue: number): number {
@@ -254,6 +310,8 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
               SOLVER_SETTING_KEYS.maxWorkDaysPerWeek,
               SOLVER_SETTING_KEYS.minRestDaysPerWeek,
               SOLVER_SETTING_KEYS.maxConsecutiveWorkDays,
+              SOLVER_SETTING_KEYS.leaveWeekendProtectionWeight,
+              SOLVER_SETTING_KEYS.exactMonthlyWorkedPlusLeavesDays,
             ],
           },
         },
@@ -294,15 +352,27 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
     );
     const dbMaxWorkDaysPerWeek = readNumberFromProviderConfig(
       settingByKey.get(SOLVER_SETTING_KEYS.maxWorkDaysPerWeek),
-      6
+      5
     );
     const dbMinRestDaysPerWeek = readNumberFromProviderConfig(
       settingByKey.get(SOLVER_SETTING_KEYS.minRestDaysPerWeek),
-      1
+      2
     );
     const dbMaxConsecutiveWorkDays = readNumberFromProviderConfig(
       settingByKey.get(SOLVER_SETTING_KEYS.maxConsecutiveWorkDays),
-      6
+      5
+    );
+    const dbLeaveWeekendProtectionWeight = readNumberFromProviderConfig(
+      settingByKey.get(SOLVER_SETTING_KEYS.leaveWeekendProtectionWeight),
+      20
+    );
+    const dbExactMonthlyWorkedPlusLeavesDays = readNumberFromProviderConfig(
+      settingByKey.get(SOLVER_SETTING_KEYS.exactMonthlyWorkedPlusLeavesDays),
+      21
+    );
+    const dbMonthlySoftTargetWeight = readNumberFromProviderConfig(
+      settingByKey.get(SOLVER_SETTING_KEYS.monthlySoftTargetWeight),
+      50
     );
 
     const openShiftsByMachineId: Record<string, string[]> = {};
@@ -369,6 +439,12 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
       time_slot_id: row.timeSlotId,
       status_id: row.statusId,
     }));
+    const unavailableDaysBase: SolverUnavailableDay[] = unavailableDays.map((es) => ({
+      employee_id: es.employeeId,
+      day_date: es.dayDate.toISOString().slice(0, 10),
+      status_id: es.statusId,
+    }));
+    const leaveWeekendProtection = computeLeaveWeekendProtection(unavailableDaysBase, from, to);
 
     const allAssignmentRows = (existingAssignments as any[]).map((a) => ({
       day_date: a.dayDate.toISOString().slice(0, 10),
@@ -557,11 +633,8 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
         color: ts.color,
         sort_order: ts.sortOrder,
       })),
-      unavailable_days: unavailableDays.map((es) => ({
-        employee_id: es.employeeId,
-        day_date: es.dayDate.toISOString().slice(0, 10),
-        status_id: es.statusId,
-      })),
+      unavailable_days: unavailableDaysBase,
+      preferred_off_days: leaveWeekendProtection.preferredOffDays,
       unavailable_shifts: unavailableShifts,
       machine_closed_shifts: machineClosedShifts,
       machine_shift_min_requirements: expandedMinRequirements,
@@ -580,6 +653,9 @@ router.post("/auto_plan", async (req: Request, res: Response) => {
         max_work_days_per_week: dbMaxWorkDaysPerWeek,
         min_rest_days_per_week: dbMinRestDaysPerWeek,
         max_consecutive_work_days: dbMaxConsecutiveWorkDays,
+        leave_weekend_protection_weight: dbLeaveWeekendProtectionWeight,
+        exact_monthly_worked_plus_leaves_days: dbExactMonthlyWorkedPlusLeavesDays,
+        monthly_soft_target_weight: dbMonthlySoftTargetWeight,
       },
     };
 

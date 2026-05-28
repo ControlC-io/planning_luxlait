@@ -892,7 +892,8 @@ function VirtualEmpGrid({
   onCellClick?: (empId: string, day: number) => void;
   filter: { search: string; group: string };
 }) {
-  const { EMPLOYEES, DAYS } = usePlanningData();
+  const { EMPLOYEES, DAYS, assignments } = usePlanningData();
+  const monthlyTarget = 21;
 
   const cellH = compact ? 38 : 48;
   const cellW = compact ? 58 : 68;
@@ -930,6 +931,20 @@ function VirtualEmpGrid({
     });
   }, [filter, EMPLOYEES]);
 
+  const monthlyTotalsByEmployee = useMemo(() => {
+    const totals = new Map<string, number>();
+    for (const emp of EMPLOYEES) {
+      let total = 0;
+      for (let day = 1; day <= DAYS; day++) {
+        const asgn = assignments[`${emp.id}-${day}`];
+        if (!asgn) continue;
+        if (asgn.type === 'work' || asgn.type === 'status') total += 1;
+      }
+      totals.set(emp.id, total);
+    }
+    return totals;
+  }, [EMPLOYEES, DAYS, assignments]);
+
   const startIdx = Math.max(0, Math.floor(scrollTop / cellH) - OVERSCAN);
   const endIdx = Math.min(
     filtered.length,
@@ -946,6 +961,11 @@ function VirtualEmpGrid({
         <div style={{ paddingTop: topPad, paddingBottom: botPad }}>
           {filtered.slice(startIdx, endIdx).map((emp, localIdx) => {
             const ei = startIdx + localIdx;
+            const monthlyTotal = monthlyTotalsByEmployee.get(emp.id) ?? 0;
+            const isOffMonthlyTarget = monthlyTotal !== monthlyTarget;
+            const monthlyAlertTitle = isOffMonthlyTarget
+              ? `Total mensuel différent de la cible: ${monthlyTotal} jours (travail + congé). Cible: ${monthlyTarget}.`
+              : undefined;
             return (
               <div
                 key={emp.id}
@@ -970,7 +990,11 @@ function VirtualEmpGrid({
                     zIndex: 2,
                     backgroundColor: ei % 2 === 0 ? t.cardBg : t.bodyBg + 'cc',
                     borderRight: `1px solid ${t.border}`,
+                    boxShadow: isOffMonthlyTarget
+                      ? 'inset 0 0 0 2px rgba(220, 38, 38, 0.55)'
+                      : undefined,
                   }}
+                  title={monthlyAlertTitle}
                 >
                   <div
                     style={{
@@ -999,7 +1023,7 @@ function VirtualEmpGrid({
                     {emp.prenom[0]}
                     {emp.nom[0]}
                   </div>
-                  <div style={{ minWidth: 0 }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
                     <div
                       style={{
                         fontSize: compact ? 11 : 12,
@@ -1025,6 +1049,21 @@ function VirtualEmpGrid({
                       {emp.backup ? ' · BACKUP' : ''}
                     </div>
                   </div>
+                  <span
+                    style={{
+                      fontSize: 9,
+                      fontWeight: 700,
+                      color: isOffMonthlyTarget ? '#dc2626' : '#16a34a',
+                      backgroundColor: isOffMonthlyTarget ? '#fee2e2' : '#dcfce7',
+                      borderRadius: 4,
+                      padding: '0 5px',
+                      lineHeight: '16px',
+                      flexShrink: 0,
+                      marginRight: 6,
+                    }}
+                  >
+                    {monthlyTotal}j
+                  </span>
                 </div>
 
                 {Array.from({ length: DAYS }, (_, i) => i + 1).map((day) => (
